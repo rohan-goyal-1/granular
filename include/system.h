@@ -72,10 +72,10 @@ public:
     const double E_i;
     std::vector<std::unique_ptr<Particle>> particles;
     std::vector<bool> active;
-    const size_t MAX_ATTEMPTS = 1E3;
+    const size_t MAX_ATTEMPTS = 1E4;
     const double i_d_phi = 1E-2;
     const double d_phi_min = 1E-10;
-    static constexpr double INIT_PHI = 0.01;
+    static constexpr double INIT_PHI = 1E-4;
     const double KE_tol = 1E-20;
     const double PE_tol = 1E-10;
     const size_t MIN_STEPS = 10;

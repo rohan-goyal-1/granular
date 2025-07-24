@@ -50,7 +50,7 @@ int main (int argc, char** argv) {
     std_logger.set_level(LogLevel::INFO);
 
     HDF5Logger logger(output_file);
-    System sys(p_type, N, Nv, 0.0, dt, mu);
+    System sys(p_type, N, Nv, 0.0, dt, mu_eff);
     sys.send_to_jamming();
     sys.remove_rattlers();
     LOG_INFO << "Jammed system and removed rattlers.";
@@ -131,7 +131,7 @@ int main (int argc, char** argv) {
         std::vector<size_t> neighbors;
         size_t center_global_idx = local_to_global_map.at(center_local_idx);
         const auto& center_particle = sys.particles[center_global_idx];
-        double R_center = center_particle->radius + 0.5 * center_particle->sigma;
+        double R_center = 1 + 0.5 * center_particle->sigma;
         double L = sys.L;
 
         auto point_to_segment_dist = [] (const Eigen::Vector2d& p, const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
@@ -146,7 +146,7 @@ int main (int argc, char** argv) {
             if (j == center_local_idx) continue;
             size_t j_global = local_to_global_map.at(j);
             const auto& pj = sys.particles[j_global];
-            double Rj = pj->radius + 0.5 * pj->sigma;
+            double Rj = 1 + 0.5 * pj->sigma;
             double effective_radius = R_center + Rj;
 
             // Find minimum image COM of pj relative to the cage center
@@ -154,7 +154,7 @@ int main (int argc, char** argv) {
             for (const auto& pt : cage) cage_center += pt;
             cage_center /= cage.size();
 
-            Eigen::Vector2d shifted_com = minimum_image(pj->com - cage_center, L) + cage_center;
+            Eigen::Vector2d shifted_com = pj->minimum_image(pj->com - cage_center, L) + cage_center;
 
             for (size_t i = 0; i < cage.size(); ++i) {
                 const auto& a = cage[i];

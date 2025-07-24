@@ -3,8 +3,8 @@ import threading
 
 # Configuration
 start_index = 1
-num_runs = 1
-output_dir = "runs/cage2/bumpy2"
+num_runs = 10
+output_dir = "runs/cage3"
 command_base = "./bin/iter_decomp"
 output_template = f"{output_dir}/{{:06d}}.h5"
 
@@ -17,7 +17,8 @@ args = [
     "--dt", "0.001",
     "--dphi", "0.01",
     "--steps", "6",
-    "--angles", "1000"
+    "--angles", "1000",
+    "--mu", "0.25"
 ]
 
 def run_command(index):
