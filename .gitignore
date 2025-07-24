@@ -1,0 +1,11 @@
+bin/
+build/
+tasks.sh
+.env
+runs/
+reports/
+*.h5
+*.svg
+*.png
+.DS_Store
+papers/
