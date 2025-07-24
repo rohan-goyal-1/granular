@@ -31,8 +31,8 @@ public:
     ~System();
 
     double get_sigma(void);
-    double get_radius(void);
     void update(void);
+    double get_particle_area(void);
     double get_ke(void);
     double get_pe(void);
     void set_temp(double temp);
@@ -58,6 +58,7 @@ public:
     double time = 0.0;
     double phi;
     double mu;
+    double L;
     const double dt;
     std::mt19937 gen;
     std::uniform_real_distribution<> dist_angle;
@@ -75,8 +76,8 @@ public:
     const double i_d_phi = 1E-2;
     const double d_phi_min = 1E-10;
     static constexpr double INIT_PHI = 0.01;
-    const double KE_tol = 1E-22;
-    const double PE_tol = 1E-9;
+    const double KE_tol = 1E-20;
+    const double PE_tol = 1E-10;
     const size_t MIN_STEPS = 10;
     const PARTICLE_TYPE particle_type;
     const double RELAX_KD = 10.0;

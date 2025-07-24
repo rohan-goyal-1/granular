@@ -24,6 +24,7 @@ int main (int argc, char** argv) {
     parser.add_argument<double>("--dphi").help("Amount of final decompression from jamming.");
     parser.add_argument<size_t>("--steps").help("Number of log-scale decompression steps.");
     parser.add_argument<size_t>("--angles", "-a").help("Number of angle samples to try for bumpy particles.").default_value(1e3);
+    parser.add_argument<double>("--mu", "-m").help("Effective friction coefficient for the particles.");
 
     try {
         parser.parse(argc, argv);
@@ -43,12 +44,13 @@ int main (int argc, char** argv) {
     double d_phi = parser.get<double>("--dphi");
     size_t num_steps = parser.get<size_t>("--steps");
     size_t angles_sampled = parser.get<size_t>("--angles");
+    double mu_eff = parser.get<double>("--mu");
 
     auto& std_logger = Logger::get_instance();
     std_logger.set_level(LogLevel::INFO);
 
     HDF5Logger logger(output_file);
-    System sys(p_type, N, Nv, 0, dt);
+    System sys(p_type, N, Nv, 0.0, dt, mu);
     sys.send_to_jamming();
     sys.remove_rattlers();
     LOG_INFO << "Jammed system and removed rattlers.";
@@ -96,6 +98,7 @@ int main (int argc, char** argv) {
         }
     }
     logger.write_dataset("/vertices", {num_active, 3}, vertex_data);
+    logger.write_attribute("/vertices", "sigma", sys.get_sigma());
 
     logger.create_group("/cages");
     std::vector<std::vector<Eigen::Vector2d>> all_cages(num_active);
@@ -129,6 +132,7 @@ int main (int argc, char** argv) {
         size_t center_global_idx = local_to_global_map.at(center_local_idx);
         const auto& center_particle = sys.particles[center_global_idx];
         double R_center = center_particle->radius + 0.5 * center_particle->sigma;
+        double L = sys.L;
 
         auto point_to_segment_dist = [] (const Eigen::Vector2d& p, const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
             Eigen::Vector2d ab = b - a;
@@ -145,15 +149,23 @@ int main (int argc, char** argv) {
             double Rj = pj->radius + 0.5 * pj->sigma;
             double effective_radius = R_center + Rj;
 
+            // Find minimum image COM of pj relative to the cage center
+            Eigen::Vector2d cage_center(0, 0);
+            for (const auto& pt : cage) cage_center += pt;
+            cage_center /= cage.size();
+
+            Eigen::Vector2d shifted_com = minimum_image(pj->com - cage_center, L) + cage_center;
+
             for (size_t i = 0; i < cage.size(); ++i) {
                 const auto& a = cage[i];
                 const auto& b = cage[(i + 1) % cage.size()];
-                if (point_to_segment_dist(pj->com, a, b) < effective_radius) {
+                if (point_to_segment_dist(shifted_com, a, b) < effective_radius) {
                     neighbors.push_back(j_global);
                     break;
                 }
             }
         }
+
         return neighbors;
     };
 
@@ -176,7 +188,7 @@ int main (int argc, char** argv) {
 
         std::string decompress_group_path = "/" + format_string(decompress_idx, 6);
         logger.create_group(decompress_group_path);
-        logger.write_attribute(decompress_group_path, "sigma", sys.get_sigma());
+        logger.write_attribute(decompress_group_path, "L", sys.L);
         logger.write_attribute(decompress_group_path, "dphi", current_dphi);
 
         for (size_t local_i = 0; local_i < num_active; ++local_i) {
@@ -228,4 +240,3 @@ int main (int argc, char** argv) {
     LOG_INFO << "Simulation finished and data written to " << output_file;
     return 0;
 }
-

@@ -13,20 +13,22 @@ class System;
 class SmoothParticle : public Particle {
 
 public:
-    SmoothParticle(System* system, double sigma, size_t id);
+    SmoothParticle(System* system, size_t id);
 
-    void rescale(double area) override;
+    void rescale_ratio(double ratio) override;
 
     void update(void) override;
     void move(Eigen::Vector2d translation) override;
     void rotate (double angle) override {
 
     }
+    void randomize_position(void) override;
     void apply_drag(double kd) override;
 
     void set_ke(double ke) override;
     double get_ke(void) override;
 
+    double get_area(void) override;
     double get_energy_interaction(Particle* other) override;
     void interact(Particle* other) override;
     void integrate(void) override;

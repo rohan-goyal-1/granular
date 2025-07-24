@@ -21,26 +21,27 @@ public:
     double theta;
 
     double sigma;
-    double radius;
 
     Eigen::Vector2d force;
 
     size_t id;
 
     Particle(System* system, double sigma, size_t id)
-        : system(system), sigma(sigma), radius(sigma), id(id) {}
+        : system(system), sigma(sigma), id(id) {}
     virtual ~Particle() = default;
 
-    virtual void rescale(double area) = 0;
+    virtual void rescale_ratio(double ratio) = 0;
 
     virtual void update(void) = 0;
     virtual void move(Eigen::Vector2d translation) = 0;
     virtual void rotate(double angle) = 0;
+    virtual void randomize_position(void) = 0;
     virtual void apply_drag(double kd) = 0;
 
     virtual void set_ke(double ke) = 0;
     virtual double get_ke(void) = 0;
 
+    virtual double get_area(void) = 0;
     virtual double get_energy_interaction(Particle* other) = 0;
     virtual void interact(Particle* other) = 0;
     virtual void integrate (void) = 0;
@@ -48,8 +49,8 @@ public:
 
     virtual bool rattles(void) = 0;
 
-    inline Eigen::Vector2d minimum_image (const Eigen::Vector2d& vec) {
-        return vec - vec.array().round().matrix();
+    inline Eigen::Vector2d minimum_image (const Eigen::Vector2d& vec, double L) {
+        return vec - L * (vec / L).array().round().matrix();
     }
 
     inline double heaviside (double x) {

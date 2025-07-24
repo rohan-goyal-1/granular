@@ -1,13 +1,13 @@
 #include "include/bumpy_particle.h"
+#include <iostream>
 
-BumpyParticle::BumpyParticle (System* system, size_t num_v, double mu_eff, double area, size_t id) :
-    Particle(system, calc_sigma(mu_eff, area), id),
+BumpyParticle::BumpyParticle (System* system, size_t num_v, double mu_eff, size_t id) :
+    Particle(system, calc_ratio(mu_eff, num_v), id),
     ang_v(0.0),
     ang_a(0.0),
     theta(0.0),
     num_v(num_v),
     mu_eff(mu_eff),
-    area(area),
     torque(0.0)
 {
     force = Eigen::Vector2d(0, 0);
@@ -25,65 +25,8 @@ BumpyParticle::BumpyParticle (System* system, size_t num_v, double mu_eff, doubl
     set_ke(0.0);
 }
 
-double BumpyParticle::calc_sigma (double mu, double target_area) {
-    if (mu <= 0.0 || target_area <= 0.0) {
-        throw std::invalid_argument("mu and target_area must be positive");
-    }
-
-    const double tol = 1e-8;
-    const int max_iter = 1000;
-    const double R_min = 1e-8;
-    const double R_max = 1e8;
-
-    double ratio = calc_ratio(mu);
-
-    auto compute_area = [&] (double R) -> double {
-        double Nv = static_cast<double>(num_v);
-        double sigma_local = ratio * R;
-        double r = sigma_local / 2.0;
-        double theta = 2.0 * M_PI / Nv;
-        double phi = M_PI - theta;
-        double d = 2.0 * R * std::sin(M_PI / Nv);
-
-        double A_polygon = 0.5 * Nv * R * R * std::sin(theta);
-
-        double A_asperities = Nv * r * r * (M_PI - phi / 2.0);
-
-        double A_overlap = 0.0;
-        if (d < 2 * r) {
-            double part1 = 2 * r * r * std::acos(d / (2 * r));
-            double part2 = 0.5 * d * std::sqrt(4 * r * r - d * d);
-            A_overlap = Nv * (part1 - part2);
-        }
-
-        return A_polygon + A_asperities - A_overlap;
-    };
-
-    double R_low = R_min;
-    double R_high = R_max;
-    double R_mid = 0.0;
-
-    for (int iter = 0; iter < max_iter; ++iter) {
-        R_mid = 0.5 * (R_low + R_high);
-        double area = compute_area(R_mid);
-
-        if (std::abs(area - target_area) < tol) {
-            break;
-        }
-
-        if (area < target_area) {
-            R_low = R_mid;
-        }
-        else {
-            R_high = R_mid;
-        }
-    }
-
-    return ratio * R_mid;
-}
-
-double BumpyParticle::calc_ratio (double mu) {
-    return (std::sin(M_PI/num_v) / 2) * std::sqrt(1/(mu * mu) + 1);
+double BumpyParticle::calc_ratio (double mu, size_t n) {
+    return (std::sin(M_PI/n)) * std::sqrt(1/(mu * mu) + 1);
 }
 
 void BumpyParticle::set_ke (double ke) {
@@ -98,16 +41,16 @@ void BumpyParticle::set_ke (double ke) {
     ang_a = 0.0;
 }
 
-
 double BumpyParticle::get_ke () {
     return 0.5 * num_v * com_v.squaredNorm() + 0.5 * moi * (ang_v * ang_v);
 }
 
-void BumpyParticle::rescale (double a) {
-    area = a;
-    sigma = calc_sigma(mu_eff, a);
-
-    generate_polygon();
+void BumpyParticle::rescale_ratio (double ratio) {
+    auto old_com = com;
+    com *= ratio;
+    for (auto& c : verts) {
+        c += old_com - com;
+    }
 }
 
 void BumpyParticle::move (Eigen::Vector2d translation) {
@@ -115,6 +58,14 @@ void BumpyParticle::move (Eigen::Vector2d translation) {
     for (auto& c : verts) {
         c += translation;
     }
+}
+
+void BumpyParticle::randomize_position () {
+    for (size_t d = 0; d < 2; d++) {
+        com[d] = system->dist_pos(system->gen);
+    }
+    theta = system->dist_angle(system->gen);
+    generate_polygon();
 }
 
 void BumpyParticle::update () {
@@ -138,10 +89,9 @@ void BumpyParticle::rotate (double angle) {
 
 void BumpyParticle::generate_polygon () {
     double angle = 2 * M_PI / num_v;
-    radius = sigma / calc_ratio(mu_eff);
 
     for (size_t i = 0; i < num_v; i++) {
-        Eigen::Vector2d displacement(radius * cos(i * angle + theta), radius * sin(i * angle + theta));
+        Eigen::Vector2d displacement(cos(i * angle + theta), sin(i * angle + theta));
         verts[i] = com + displacement;
     }
 
@@ -149,12 +99,25 @@ void BumpyParticle::generate_polygon () {
 }
 
 double BumpyParticle::_moi () {
-    double ret = 0.0;
-    for (auto& c : verts) {
-        Eigen::Vector2d r = c - com;
-        ret += r.squaredNorm();
+    return num_v;
+    // double ret = 0.0;
+    // for (auto& c : verts) {
+    //     Eigen::Vector2d r = c - com;
+    //     ret += r.squaredNorm();
+    // }
+    // return ret;
+}
+
+double BumpyParticle::get_area () {
+    double l = 2 * sin(M_PI / num_v);
+    if (l > sigma) {
+        throw std::runtime_error("Invalid geometry: vertex spacing larger than sigma");
     }
-    return ret;
+    double polygon_area = 0.5 * num_v * sin(2 * M_PI / num_v);
+    double vertices_area = (1.0 - ((num_v - 2.0) / (2.0 * num_v))) * M_PI * num_v * sigma * sigma / 4;
+    double vertex_overlaps = 0.5 * num_v * (sigma * sigma * acos(l / sigma) - l * std::sqrt(sigma * sigma - l * l));
+
+    return polygon_area + vertices_area - vertex_overlaps;
 }
 
 double BumpyParticle::get_energy_interaction (Particle* other) {
@@ -163,7 +126,7 @@ double BumpyParticle::get_energy_interaction (Particle* other) {
         double pe = 0.0;
         for (auto &c1 : verts) {
             for (auto &c2 : bumpy->verts) {
-                Eigen::Vector2d r = minimum_image(c2 - c1);
+                Eigen::Vector2d r = minimum_image(c2 - c1, system->L);
 
                 double dist = r.norm();
                 pe += 0.5 * pow((sigma_l - dist), 2) * heaviside(sigma_l - dist);
@@ -196,7 +159,7 @@ void BumpyParticle::interact (Particle* other) {
             for (size_t j = 0; j < bumpy->num_v; j++) {
                 auto& c2 = bumpy->verts[j];
 
-                Eigen::Vector2d r = minimum_image(c2 - c1);
+                Eigen::Vector2d r = minimum_image(c2 - c1, system->L);
 
                 double dist = r.norm();
                 Eigen::Vector2d r_u;

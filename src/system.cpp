@@ -10,10 +10,11 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
     adj_contacts(num_v * num_p, num_v * num_p),
     phi(phi),
     mu(mu),
+    L(1.0),
     dt(dt),
     gen((std::random_device{}())),
     dist_angle(std::uniform_real_distribution<>(0.0, 2 * M_PI)),
-    dist_pos(std::uniform_real_distribution<>(0.0, 1)),
+    dist_pos(std::uniform_real_distribution<>(0.0, 1.0)),
     dist_sign(std::uniform_int_distribution<>(0, 1)),
     num_p(num_p),
     num_v(num_v),
@@ -29,21 +30,23 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
     adj_contacts.setZero();
     id = get_id();
 
-    for (size_t curr_attempt = 0; curr_attempt < MAX_ATTEMPTS; curr_attempt++) {
-        particles.clear();
-        particles.reserve(num_p);
+    particles.reserve(num_p);
+    for (size_t i = 0; i < num_p; i++) {
+        switch (particle_type) {
+            case PARTICLE_TYPE::SMOOTH:
+                particles.push_back(std::make_unique<SmoothParticle>(this, i));
+                break;
+            case PARTICLE_TYPE::BUMPY:
+                particles.push_back(std::make_unique<BumpyParticle>(this, num_v, mu, i));
+                break;
+            default:
+                throw std::runtime_error("System CONSTRUCTOR: Unknown particle type.");
+        }
+    }
 
-        for (size_t i = 0; i < num_p; i++) {
-            switch (particle_type) {
-                case PARTICLE_TYPE::SMOOTH:
-                    particles.push_back(std::make_unique<SmoothParticle>(this, 1.0, i));
-                    break;
-                case PARTICLE_TYPE::BUMPY:
-                    particles.push_back(std::make_unique<BumpyParticle>(this, num_v, mu, INIT_PHI / num_p, i));
-                    break;
-                default:
-                    throw std::runtime_error("System CONSTRUCTOR: Unknown particle type.");
-            }
+    for (size_t curr_attempt = 0; curr_attempt < MAX_ATTEMPTS; curr_attempt++) {
+        for (auto& p : particles) {
+            p->randomize_position();
         }
 
         rescale(INIT_PHI);
@@ -52,7 +55,8 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
 
     grow_to_phi(phi);
 
-    double interaction_radius = 2.0 * get_radius();
+    // double interaction_radius = 2.0 * get_radius();
+    double interaction_radius = 2.0 * 1.0;
     verlet_skin_radius = 0.4 * interaction_radius;
     double verlet_cutoff = interaction_radius + verlet_skin_radius;
     verlet_cutoff_sq = verlet_cutoff * verlet_cutoff;
@@ -68,6 +72,10 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
 }
 
 System::~System() = default;
+
+double System::get_sigma () {
+    return particles[0]->sigma;
+}
 
 void System::apply_pbc_to_vector (Eigen::Vector2d& vec) const {
     vec.x() -= 1 * std::round(vec.x() / 1);
@@ -122,22 +130,17 @@ void System::check_verlet_rebuild () {
     }
 }
 
-double System::get_radius () {
-    return particles[0]->radius;
-}
-
-double System::get_sigma () {
-    return particles[0]->sigma;
-}
-
 void System::rescale (double _phi) {
-    // TODO: Dont rescale based on phi but on radius increments
     phi = _phi;
-    double area_part = phi / num_p;
+    double old_L = L;
+    double p_area = get_particle_area();
+
+    L = std::sqrt(p_area / phi);
+
+    double ratio = L / old_L;
     for (auto& p : particles) {
-        p->rescale(area_part);
+        p->rescale_ratio(ratio);
     }
-    fire_minimize();
 
     // double interaction_radius = 2.5 * get_sigma();
     // verlet_skin_radius = 0.4 * interaction_radius;
@@ -149,6 +152,7 @@ void System::rescale (double _phi) {
 }
 
 void System::set_temp (double temp) {
+    LOG_WARNING << "setting temperature doesn't rescale; it regenerates heading and stuff";
     for (auto& p : particles) {
         p->set_ke(temp);
     }
@@ -275,14 +279,15 @@ void System::send_to_jamming () {
     double pe = get_pe();
     double last_pe = pe;
 
-    while (pe != PE_tol) {
+    while (pe < PE_tol || pe > 1.01 * PE_tol) {
         if (
-            (pe < PE_tol && last_pe > PE_tol) ||
-            (pe > PE_tol && last_pe < PE_tol)
+            (pe < PE_tol && last_pe > 1.01 * PE_tol) ||
+            (pe > 1.01 * PE_tol && last_pe < PE_tol)
         ) {
             if (d_phi * 0.5 < d_phi_min) {
                 if (pe < PE_tol) {
                     rescale(phi + d_phi);
+                    fire_minimize();
                 }
                 return;
             }
@@ -295,6 +300,8 @@ void System::send_to_jamming () {
             rescale(phi + d_phi);
         else
             rescale(phi - d_phi);
+
+        fire_minimize();
 
         last_pe = pe;
         pe = get_pe();
@@ -387,6 +394,13 @@ size_t System::get_id () {
     return curr_id.load() - 1;
 }
 
+double System::get_particle_area () {
+    double area = 0.0;
+    for (auto& p : particles) {
+        area += p->get_area();
+    }
+    return area;
+}
 
 std::vector<double> System::get_verts () const {
     // TODO: Fix me

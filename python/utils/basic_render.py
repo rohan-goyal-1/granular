@@ -23,14 +23,16 @@ with h5py.File(FILE, 'r') as f:
 
 # === BASIC INFO ===
 num_particles, num_verts, _ = frames[0].shape
-box_length = 1.0
+box_length = 5.96727
 shifts = list(itertools.product([-1, 0, 1], [-1, 0, 1]))  # 9 periodic shifts
 
 # === FIGURE SETUP ===
 fig, ax = plt.subplots(figsize=(8, 8))
 ax.set_aspect('equal')
-ax.set_xlim(-0.5, 1.5)
-ax.set_ylim(-0.5, 1.5)
+# ax.set_xlim(-0.5, 1.5)
+# ax.set_ylim(-0.5, 1.5)
+ax.set_xlim(0 - box_length * 0.5, box_length + box_length * 0.5)
+ax.set_ylim(0 - box_length * 0.5, box_length + box_length * 0.5)
 ax.set_title("PBC Particle System with Correct Overlap Lines")
 
 # === DRAW SIMULATION BOX ===

@@ -1,7 +1,7 @@
 #include "include/smooth_particle.h"
 
-SmoothParticle::SmoothParticle (System* system, double sigma, size_t id) :
-    Particle(system, sigma, id)
+SmoothParticle::SmoothParticle (System* system, size_t id) :
+    Particle(system, 2.0, id)
 {
     theta = 0.0;
     force = Eigen::Vector2d(0, 0);
@@ -12,8 +12,12 @@ SmoothParticle::SmoothParticle (System* system, double sigma, size_t id) :
     set_ke(0.0);
 }
 
-void SmoothParticle::rescale (double area) {
-    sigma = std::sqrt(area * 4 / M_PI);
+void SmoothParticle::rescale_ratio (double ratio) {
+    com *= ratio;
+}
+
+double SmoothParticle::get_area () {
+    return M_PI * sigma * sigma / 4;
 }
 
 void SmoothParticle::update (void) {
@@ -23,6 +27,12 @@ void SmoothParticle::update (void) {
 
 void SmoothParticle::move (Eigen::Vector2d translation) {
     com += translation;
+}
+
+void SmoothParticle::randomize_position () {
+    for (size_t d = 0; d < 2; d++) {
+        com[d] = system->dist_pos(system->gen);
+    }
 }
 
 void SmoothParticle::set_ke (double ke) {
@@ -39,7 +49,7 @@ double SmoothParticle::get_ke () {
 double SmoothParticle::get_energy_interaction (Particle* other) {
     if (auto* smooth = dynamic_cast<SmoothParticle*>(other)) {
         double sigma_l = (sigma + smooth->sigma) / 2;
-        Eigen::Vector2d r = minimum_image(smooth->com - com);
+        Eigen::Vector2d r = minimum_image(smooth->com - com, system->L);
         double dist = r.norm();
         double pe = 0.5 * pow((sigma_l - dist), 2) * heaviside(sigma_l - dist);
         return pe;
@@ -53,7 +63,7 @@ void SmoothParticle::interact (Particle* other) {
     if (auto* smooth = dynamic_cast<SmoothParticle*>(other)) {
         double sigma_l = (sigma + smooth->sigma) / 2;
 
-        Eigen::Vector2d r = minimum_image(smooth->com - com);
+        Eigen::Vector2d r = minimum_image(smooth->com - com, system->L);
         double dist = r.norm();
 
         Eigen::Vector2d r_u;
