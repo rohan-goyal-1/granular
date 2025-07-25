@@ -22,7 +22,7 @@ with h5py.File(FILE, 'r') as f:
 
 # === BASIC INFO ===
 num_particles, num_verts, _ = frames[0].shape
-box_length = 6.20576
+box_length = 9.10286
 shifts = list(itertools.product([-1, 0, 1], [-1, 0, 1]))  # 9 periodic shifts
 
 # === FIGURE SETUP ===

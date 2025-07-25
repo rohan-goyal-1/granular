@@ -198,7 +198,6 @@ int main (int argc, char** argv) {
             if (sample_pts.empty()) continue;
 
             std::vector<size_t> neighbor_globals = find_relevant_neighbors(local_i, all_cages[local_i]);
-            std::cout << neighbor_globals.size() << '\n';
             Eigen::Vector2d original_pos = sys.particles[global_i]->com;
             double original_theta = sys.particles[global_i]->theta;
 
