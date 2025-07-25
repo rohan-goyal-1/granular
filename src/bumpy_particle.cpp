@@ -115,7 +115,7 @@ double BumpyParticle::get_area () {
     }
     double polygon_area = 0.5 * num_v * sin(2 * M_PI / num_v);
     double vertices_area = (1.0 - ((num_v - 2.0) / (2.0 * num_v))) * M_PI * num_v * sigma * sigma / 4;
-    double vertex_overlaps = 0.5 * num_v * (sigma * sigma * acos(l / sigma) - l * std::sqrt(sigma * sigma - l * l));
+    double vertex_overlaps = 0.25 * num_v * (sigma * sigma * acos(l / sigma) - l * std::sqrt(sigma * sigma - l * l));
 
     return polygon_area + vertices_area - vertex_overlaps;
 }
