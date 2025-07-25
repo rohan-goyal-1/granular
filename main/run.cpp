@@ -11,7 +11,7 @@ std::string format_string (size_t i, size_t sz) {
 int main (int argc, char** argv) {
     HDF5Logger file_logger("run.h5");
     file_logger.create_group("/frames");
-    System sys(PARTICLE_TYPE::BUMPY, 3, 3, 0.0, 1e-3, 1/sqrt(16.0));
+    System sys(PARTICLE_TYPE::BUMPY, 5, 8, 0.0, 1e-3, 0.5);
     // auto& logger = Logger::get_instance();
     // logger.set_level(LogLevel::INFO);
 
@@ -28,9 +28,10 @@ int main (int argc, char** argv) {
     //     std::cout << p->moi << ' ' << p->com.x() << ' ' << p->com.y() << ' ' << p->sigma << ' ' << p->theta << '\n';
     // }
 
-    // LOG_INFO << system.phi;
+    LOG_INFO << sys.phi;
+    LOG_INFO << sys.L;
     auto particles = sys.get_verts();
-    file_logger.write_dataset("/frames/0", {3, 3, 2}, particles);
+    file_logger.write_dataset("/frames/0", {5, 8, 2}, particles);
     file_logger.write_attribute("/frames/0", "sigma", sys.particles[0]->sigma);
 
     // for (size_t i = 0; i < 1e6; i++) {

@@ -1,15 +1,16 @@
 import subprocess
-import threading
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
-start_index = 1
 num_runs = 10
-output_dir = "runs/cage3"
+mu_values = [0.3, 0.35, 0.4, 0.45, 0.5]
+base_output_dir = "runs/cage3"
 command_base = "./bin/iter_decomp"
-output_template = f"{output_dir}/{{:06d}}.h5"
+max_parallel = 4  # Number of parallel threads per mu
 
-# Fixed command arguments
-args = [
+# Fixed command arguments (excluding --mu and --output)
+base_args = [
     "--bumpy",
     "--nv", "8",
     "--np", "20",
@@ -18,25 +19,26 @@ args = [
     "--dphi", "0.01",
     "--steps", "6",
     "--angles", "1000",
-    "--mu", "0.25"
 ]
 
-def run_command(index):
-    output_file = output_template.format(index)
-    cmd = [command_base, "--output", output_file] + args
+def run_command(index, mu, output_dir):
+    output_file = os.path.join(output_dir, f"{index:06d}.h5")
+    cmd = [command_base, "--output", output_file] + base_args + ["--mu", str(mu)]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd)
 
-# Create and start threads
-threads = []
-for i in range(start_index, start_index + num_runs):
-    t = threading.Thread(target=run_command, args=(i,))
-    t.start()
-    threads.append(t)
+# Iterate over mu values sequentially
+for mu in mu_values:
+    output_dir = os.path.join(base_output_dir, f"mu_{mu}")
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\n=== Running mu = {mu} ===")
 
-# Wait for all threads to finish
-for t in threads:
-    t.join()
+    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        futures = [
+            executor.submit(run_command, i + 1, mu, output_dir)
+            for i in range(num_runs)
+        ]
+        for future in as_completed(futures):
+            future.result()  # Propagate exceptions
 
-print("All subprocesses finished.")
-
+print("All simulations completed.")

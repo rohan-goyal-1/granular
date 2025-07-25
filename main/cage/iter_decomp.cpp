@@ -71,6 +71,7 @@ int main (int argc, char** argv) {
 
     logger.write_attribute("/", "Np", int(num_active));
     logger.write_attribute("/", "Nv", int(Nv));
+    logger.write_attribute("/", "mu", mu_eff);
     logger.write_attribute("/", "bumpy", (int) (p_type == PARTICLE_TYPE::BUMPY));
 
     std::vector<double> flat_dynam_matrix;
