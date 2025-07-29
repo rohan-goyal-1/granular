@@ -35,12 +35,14 @@ public:
     void apply_drag(double kd) override;
 
     void set_ke(double ke) override;
+    void set_random_ke(double ke) override;
     double get_ke(void) override;
     double _moi(void);
 
     double get_area(void) override;
+    double get_mass(void) const override;
     double get_energy_interaction(Particle* other) override;
-    void interact(Particle* other) override;
+    void interact(Particle* other, std::vector<Eigen::Triplet<double>>& new_contacts) override;
     void integrate(void) override;
     void reset_dynamics(void) override;
 

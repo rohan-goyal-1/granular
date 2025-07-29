@@ -8,21 +8,92 @@
 
 #include <Eigen/Dense>
 
-// === DATA STRUCTURES ===
+using Vector2d = Eigen::Vector2d;
+using Polygon = std::vector<Vector2d>;
+
+struct Line {
+    Vector2d normal;
+    double offset; // n · x = offset
+};
+
+// Minimum image distance (wrapped vector)
+Vector2d minimum_image (const Vector2d& vec, double L) {
+    return vec - (vec / L).array().round().matrix() * L;
+}
+
+// Bisector function
+Line bisector (const Vector2d& a, const Vector2d& b) {
+    Vector2d mid = 0.5 * (a + b);
+    Vector2d normal = b - a;
+
+    if (normal.squaredNorm() < 1e-12) {
+        return {Vector2d(0,0), 0};
+    }
+
+    normal.normalize();
+    double offset = normal.dot(mid);
+    return {normal, offset};
+}
+// Clip polygon with a half-plane defined by line (n · x <= offset)
+Polygon clip_polygon (const Polygon& poly, const Line& line) {
+    Polygon new_poly;
+    size_t n = poly.size();
+
+    for (size_t i = 0; i < n; ++i) {
+        const Vector2d& A = poly[i];
+        const Vector2d& B = poly[(i + 1) % n];
+
+        double da = line.normal.dot(A) - line.offset;
+        double db = line.normal.dot(B) - line.offset;
+
+        if (da <= 0) new_poly.push_back(A); // A is inside
+
+        if (da * db < 0) { // crosses boundary
+            double t = da / (da - db);
+            Vector2d intersect = A + t * (B - A);
+            new_poly.push_back(intersect);
+        }
+    }
+
+    return new_poly;
+}
+
+// Main cage function
+Polygon make_cage (size_t center, const std::vector<Vector2d>& points, double L) {
+    const double INF = 1e9;
+    Polygon cage = {
+        Vector2d(-INF, -INF),
+        Vector2d(INF, -INF),
+        Vector2d(INF, INF),
+        Vector2d(-INF, INF)
+    };
+
+    size_t n = points.size();
+    for (size_t i = 0; i < n; i++) if (center != i) {
+        Vector2d true_neighbor = points[center] + minimum_image(points[i] - points[center], L);
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                Vector2d shift(dx * L, dy * L);
+                Vector2d shifted = true_neighbor + shift;
+                Line bis = bisector(points[center], shifted);
+                cage = clip_polygon(cage, bis);
+                if (cage.empty()) {
+                    std::cout << "degenerate cage\n";
+                    return {}; // degenerate cage
+                }
+            }
+        }
+    }
+
+    return cage;
+}
+
 struct Triangle {
     Eigen::Vector2d a, b, c;
     double area;
 };
 
-// --- HELPER FOR CONVEX HULL ---
-// Computes the Z-component of the cross product of vectors (p1-p0) and (p2-p0).
-// > 0 for counter-clockwise turn, < 0 for clockwise, = 0 for collinear.
-double cross_product_z (const Eigen::Vector2d& p0, const Eigen::Vector2d& p1, const Eigen::Vector2d& p2) {
-    return (p1.x() - p0.x()) * (p2.y() - p0.y()) - (p1.y() - p0.y()) * (p2.x() - p0.x());
-}
-
-// === GEOMETRY UTILS ===
-std::vector<Triangle> triangulate (const std::vector<Eigen::Vector2d>& poly) {
+std::vector<Triangle> triangulate (const Polygon& poly) {
     std::vector<Triangle> tris;
     for (size_t i = 1; i + 1 < poly.size(); i++) {
         Triangle tri{poly[0], poly[i], poly[i + 1]};
@@ -39,156 +110,7 @@ Eigen::Vector2d sample_point (const Triangle& tri, std::mt19937& gen, std::unifo
     return tri.a + u * (tri.b - tri.a) + v * (tri.c - tri.a);
 }
 
-struct CageResult {
-    std::vector<Eigen::Vector2d> cage_polygon;
-    std::vector<size_t> neighbor_indices;
-};
-
-std::vector<Eigen::Vector2d> generate_cage (const std::vector<Eigen::Vector2d>& particles, size_t center_idx) {
-    const std::vector<Eigen::Vector2d> shifts = {
-        {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 0}, {0, 1}, {1, -1}, {1, 0}, {1, 1}
-    };
-
-    const Eigen::Vector2d& center = particles[center_idx];
-    std::vector<Eigen::Vector2d> cage = {
-        center + Eigen::Vector2d(-1.0, -1.0),
-        center + Eigen::Vector2d(1.0, -1.0),
-        center + Eigen::Vector2d(1.0, 1.0),
-        center + Eigen::Vector2d(-1.0, 1.0)
-    };
-
-    for (size_t pi = 0; pi < particles.size(); ++pi) {
-        if (pi == center_idx) continue;
-        for (const auto& shift : shifts) {
-            Eigen::Vector2d img = particles[pi] + shift;
-            Eigen::Vector2d dr = center - img;
-            Eigen::Vector2d midpoint = center - 0.5 * dr;
-            Eigen::Vector2d normal = dr;
-
-            std::vector<Eigen::Vector2d> new_cage;
-            if (cage.empty()) return {};
-
-            Eigen::Vector2d prev = cage.back();
-            bool prev_in = normal.dot(prev - midpoint) >= 0;
-            for (const auto& curr : cage) {
-                bool curr_in = normal.dot(curr - midpoint) >= 0;
-                if (prev_in != curr_in) {
-                    Eigen::Vector2d edge = curr - prev;
-                    double t = normal.dot(midpoint - prev) / normal.dot(edge);
-                    new_cage.push_back(prev + t * edge);
-                }
-                if (curr_in) new_cage.push_back(curr);
-                prev = curr;
-                prev_in = curr_in;
-            }
-            cage = std::move(new_cage);
-        }
-    }
-    return cage;
-}
-
-// --- CONVEX HULL ALGORITHM (Monotone Chain) ---
-std::vector<Eigen::Vector2d> compute_convex_hull(std::vector<Eigen::Vector2d>& points) {
-    if (points.size() <= 3) return points;
-
-    // Sort points lexicographically
-    std::sort(points.begin(), points.end(), [](const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
-        return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y());
-    });
-
-    std::vector<Eigen::Vector2d> upper_hull, lower_hull;
-    for (const auto& p : points) {
-        while (lower_hull.size() >= 2 && cross_product_z(lower_hull[lower_hull.size()-2], lower_hull.back(), p) <= 0) {
-            lower_hull.pop_back();
-        }
-        lower_hull.push_back(p);
-    }
-
-    for (int i = points.size() - 1; i >= 0; --i) {
-        const auto& p = points[i];
-        while (upper_hull.size() >= 2 && cross_product_z(upper_hull[upper_hull.size()-2], upper_hull.back(), p) <= 0) {
-            upper_hull.pop_back();
-        }
-        upper_hull.push_back(p);
-    }
-
-    lower_hull.pop_back();
-    upper_hull.pop_back();
-    lower_hull.insert(lower_hull.end(), upper_hull.begin(), upper_hull.end());
-    return lower_hull;
-}
-
-// --- THE FULL OPTIMIZED PROTOCOL ---
-// This function replaces the old generate_cage call in main.cpp
-std::vector<Eigen::Vector2d> generate_minkowski_cage(
-    size_t center_local_idx,
-    const std::vector<Eigen::Vector2d>& active_particle_COMs,
-    const std::unordered_map<size_t, size_t>& local_to_global_map,
-    const std::vector<std::unique_ptr<Particle>>& all_particles
-) {
-    std::vector<Eigen::Vector2d> cage = generate_cage(active_particle_COMs, center_local_idx);
-    if (cage.empty()) return {};
-
-    size_t center_global_idx = local_to_global_map.at(center_local_idx);
-    double center_radius = all_particles[center_global_idx]->sigma;
-
-    const int points_per_circle = 32;
-    for (size_t neighbor_local_idx = 0; neighbor_local_idx < active_particle_COMs.size(); ++neighbor_local_idx) {
-        if (neighbor_local_idx == center_local_idx) continue;
-
-        size_t neighbor_global_idx = local_to_global_map.at(neighbor_local_idx);
-        const auto& neighbor = all_particles[neighbor_global_idx];
-        double forbidden_radius = center_radius + neighbor->sigma;
-
-        std::vector<Eigen::Vector2d> circle_pts;
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                Eigen::Vector2d neighbor_pos = neighbor->com + Eigen::Vector2d(dx, dy);
-                for (int k = 0; k < points_per_circle; ++k) {
-                    double angle = 2.0 * M_PI * k / points_per_circle;
-                    circle_pts.push_back(neighbor_pos + forbidden_radius * Eigen::Vector2d(std::cos(angle), std::sin(angle)));
-                }
-            }
-        }
-
-        std::vector<Eigen::Vector2d> hull = compute_convex_hull(circle_pts);
-        if (hull.size() < 3) continue;
-
-        for (size_t i = 0; i < hull.size(); ++i) {
-            Eigen::Vector2d p1 = hull[i];
-            Eigen::Vector2d p2 = hull[(i + 1) % hull.size()];
-            Eigen::Vector2d edge = p2 - p1;
-            Eigen::Vector2d normal(-edge.y(), edge.x());
-
-            std::vector<Eigen::Vector2d> new_cage;
-            Eigen::Vector2d prev = cage.back();
-            bool prev_in = normal.dot(prev - p1) >= 0;
-
-            for (const auto& curr : cage) {
-                bool curr_in = normal.dot(curr - p1) >= 0;
-                if (prev_in != curr_in) {
-                    Eigen::Vector2d clip_edge = curr - prev;
-                    double denominator = normal.dot(clip_edge);
-                    if (std::abs(denominator) > 1e-9) {
-                        double t = normal.dot(p1 - prev) / denominator;
-                        new_cage.push_back(prev + t * clip_edge);
-                    }
-                }
-                if (curr_in) new_cage.push_back(curr);
-                prev = curr;
-                prev_in = curr_in;
-            }
-
-            cage = std::move(new_cage);
-            if (cage.empty()) break;
-        }
-        if (cage.empty()) break;
-    }
-
-    return cage;
-}
-// === MAIN SAMPLING FUNCTION ===
-std::vector<Eigen::Vector2d> generate_sample_points (const std::vector<Eigen::Vector2d>& cage, size_t N) {
+std::vector<Eigen::Vector2d> generate_sample_points (const Polygon& cage, size_t N) {
     if (cage.size() < 3) {
         return {};
     }

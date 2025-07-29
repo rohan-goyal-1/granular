@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from matplotlib.patches import Circle, Rectangle, Polygon
 from matplotlib.collections import LineCollection
-import itertools
 import seaborn as sns
 
 # === CONFIG ===
@@ -22,18 +21,26 @@ with h5py.File(FILE, 'r') as f:
 
 # === BASIC INFO ===
 num_particles, num_verts, _ = frames[0].shape
-box_length = 9.10286
-shifts = list(itertools.product([-1, 0, 1], [-1, 0, 1]))  # 9 periodic shifts
+box_length = 9.13391852902415557
 
 # === FIGURE SETUP ===
 fig, ax = plt.subplots(figsize=(8, 8))
 ax.set_aspect('equal')
-ax.set_xlim(0 - box_length * 0.5, box_length + box_length * 0.5)
-ax.set_ylim(0 - box_length * 0.5, box_length + box_length * 0.5)
-ax.set_title("PBC Particle System with Circles and Polygons")
+xlims = (-box_length * 0.5, box_length * 1.5)
+ylims = (-box_length * 0.5, box_length * 1.5)
+ax.set_xlim(*xlims)
+ax.set_ylim(*ylims)
+
+# === COMPUTE NECESSARY PBC SHIFTS TO COVER THE SCREEN ===
+n_shift_x = int(np.ceil((xlims[1] - xlims[0]) / box_length))
+n_shift_y = int(np.ceil((ylims[1] - ylims[0]) / box_length))
+range_x = range(-n_shift_x, n_shift_x + 1)
+range_y = range(-n_shift_y, n_shift_y + 1)
+shifts = list((dx, dy) for dx in range_x for dy in range_y)
+num_shifts = len(shifts)
 
 # === DRAW SIMULATION BOX ===
-box = Rectangle((0, 0), box_length, box_length, fill=False, edgecolor='black', linewidth=2)
+box = Rectangle((0, 0), box_length, box_length, fill=False, edgecolor='black', linewidth=1, alpha = 0.8)
 ax.add_patch(box)
 
 # === COLORS ===
@@ -44,8 +51,8 @@ circle_groups = []
 for pi in range(num_particles):
     group = []
     for vi in range(num_verts):
-        for dx, dy in shifts:
-            circle = Circle((0, 0), radius=sigmas[0] / 2, facecolor=colors[pi], edgecolor='black', alpha=0.8)
+        for _ in shifts:
+            circle = Circle((0, 0), radius=sigmas[0] / 2, facecolor=colors[pi], alpha=1.0)
             ax.add_patch(circle)
             group.append(circle)
     circle_groups.append(group)
@@ -56,13 +63,13 @@ for pi in range(num_particles):
     group = []
     for _ in shifts:
         poly = Polygon(np.zeros((num_verts, 2)), closed=True,
-                       facecolor='none', edgecolor='black', linewidth=1.5)
+                       facecolor=colors[pi], alpha=1.0)
         ax.add_patch(poly)
         group.append(poly)
     polygon_groups.append(group)
 
 # === CONTACT LINE COLLECTION ===
-contact_lines = LineCollection([], colors='red', linestyles='dotted', linewidths=1.0)
+contact_lines = LineCollection([], colors='red', linewidths=1.0)
 ax.add_collection(contact_lines)
 
 def init():
@@ -82,7 +89,6 @@ def animate(frame_idx):
     segments = []
 
     all_image_positions = {}
-    center_shift_index = shifts.index((0, 0))
 
     # Step 1: Circles and polygons
     for pi in range(num_particles):
@@ -91,7 +97,7 @@ def animate(frame_idx):
             base = verts[pi, vi]
             for shift_idx, (dx, dy) in enumerate(shifts):
                 shifted = base + np.array([dx * box_length, dy * box_length])
-                circle_idx = vi * len(shifts) + shift_idx
+                circle_idx = vi * num_shifts + shift_idx
                 circle = circle_groups[pi][circle_idx]
                 circle.center = shifted
                 circle.set_radius(radius)
@@ -100,24 +106,32 @@ def animate(frame_idx):
         # Polygon per shift
         for shift_idx, (dx, dy) in enumerate(shifts):
             shift = np.array([dx * box_length, dy * box_length])
-            shifted_poly = verts[pi] + shift  # shape: (V, 2)
+            shifted_poly = verts[pi] + shift
             polygon_groups[pi][shift_idx].set_xy(shifted_poly)
 
-    # Step 2: Overlaps (center particle vs all periodic images)
-    for pi1 in range(num_particles):
-        for vi1 in range(num_verts):
-            p1 = all_image_positions[(pi1, vi1, center_shift_index)]
-            for pi2 in range(num_particles):
-                if pi1 == pi2:
-                    continue
-                for vi2 in range(num_verts):
-                    for shift_idx, _ in enumerate(shifts):
-                        p2 = all_image_positions[(pi2, vi2, shift_idx)]
-                        if np.linalg.norm(p1 - p2) < sigma_frame:
-                            segments.append([p1, p2])
+    # Step 2: Contacts between all particle images (excluding same particle)
+    keys = list(all_image_positions.keys())
+    contact_count = {pi: 0 for pi in range(num_particles)}  # NEW
+
+    for i in range(len(keys)):
+        pi1, vi1, s1 = keys[i]
+        p1 = all_image_positions[keys[i]]
+        for j in range(i + 1, len(keys)):
+            pi2, vi2, s2 = keys[j]
+            if pi1 == pi2:
+                continue  # skip same particle, even across periodic images
+            p2 = all_image_positions[keys[j]]
+            if np.linalg.norm(p1 - p2) < sigma_frame:
+                segments.append([p1, p2])
+                contact_count[pi1] += 1
+                contact_count[pi2] += 1
+
+    # NEW: Print warning for undercoordinated particles
+    for pi, count in contact_count.items():
+        if count < 3:
+            print(f"WARNING: Particle {pi} has only {count} contacts at frame {frame_idx}")
 
     contact_lines.set_segments(segments)
-    ax.set_title(f"Frame {frame_idx:04d}")
     return sum(circle_groups, []) + sum(polygon_groups, []) + [contact_lines]
 
 anim = animation.FuncAnimation(fig, animate, init_func=init, frames=len(frames),

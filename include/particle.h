@@ -21,6 +21,7 @@ public:
     double theta;
 
     double sigma;
+    double area;
 
     Eigen::Vector2d force;
 
@@ -39,12 +40,14 @@ public:
     virtual void apply_drag(double kd) = 0;
 
     virtual void set_ke(double ke) = 0;
+    virtual void set_random_ke(double ke) = 0;
     virtual double get_ke(void) = 0;
 
     virtual double get_area(void) = 0;
+    virtual double get_mass(void) const = 0;
     virtual double get_energy_interaction(Particle* other) = 0;
-    virtual void interact(Particle* other) = 0;
-    virtual void integrate (void) = 0;
+    virtual void interact(Particle* other, std::vector<Eigen::Triplet<double>>& new_contacts) = 0;
+    virtual void integrate(void) = 0;
     virtual void reset_dynamics(void) = 0;
 
     virtual bool rattles(void) = 0;

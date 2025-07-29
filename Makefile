@@ -7,13 +7,11 @@ CXXFLAGS := -Wall -march=native -O3 -std=c++17 -MMD -MP
 INCLUDES := -I/opt/homebrew/opt/llvm/include \
             -I/opt/homebrew/include/eigen3 \
             -I/opt/homebrew/include \
-            -I/opt/homebrew/opt/libomp/include \
             -I.
 
 LDFLAGS := -L/opt/homebrew/opt/llvm/lib \
-           -L/opt/homebrew/opt/libomp/lib \
            -L/opt/homebrew/lib
-LDLIBS := -lhdf5 -lhdf5_cpp -fopenmp
+LDLIBS := -lhdf5 -lhdf5_cpp
 
 SOURCES := $(wildcard src/*.cpp) $(wildcard protocol/src/*.cpp) $(wildcard utils/src/*.cpp)
 OBJECTS := $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(notdir $(SOURCES)))
@@ -35,11 +33,11 @@ $(BUILD_DIR)/%.o: utils/src/%.cpp | builddirs
 
 .PHONY: build
 build: all
-	@echo "Run \`make run TARGET=<file.cpp>\` to compile a specific main file."
+	@echo "Run \`make run EXE=<file.cpp>\` to compile a specific main file."
 
 .PHONY: run
 run: build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) -o $(BIN_DIR)/$(basename $(notdir $(TARGET))) main/$(TARGET) $(OBJECTS) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) -o $(BIN_DIR)/$(basename $(notdir $(EXE))) main/$(EXE) $(OBJECTS) $(LDLIBS)
 
 .PHONY: clean
 clean:

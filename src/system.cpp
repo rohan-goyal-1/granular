@@ -1,37 +1,32 @@
-// TODO: Fix temp calculations
-
 #include "include/system.h"
 #include "utils/include/logger.h"
-#include "include/cell_list.h"
 
-std::atomic<int> System::curr_id{0};
-
-System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double E_i, double dt, double mu, double phi) :
-    adj_contacts(num_v * num_p, num_v * num_p),
-    phi(phi),
-    mu(mu),
-    L(1.0),
-    dt(dt),
-    gen((std::random_device{}())),
-    dist_angle(std::uniform_real_distribution<>(0.0, 2 * M_PI)),
-    dist_pos(std::uniform_real_distribution<>(0.0, 1.0)),
-    dist_sign(std::uniform_int_distribution<>(0, 1)),
-    num_p(num_p),
-    num_v(num_v),
-    E_i(E_i),
-    active(num_p, true),
-    particle_type(particle_type),
-    verlet_displacements(num_p)
+System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double E_i, double dt, double mu, double phi)
+    : adj_contacts(num_v * num_p, num_v * num_p),
+      phi(phi),
+      mu(mu),
+      L(1.0),
+      dt(dt),
+      gen((std::random_device{}())),
+      dist_angle(0.0, 2 * M_PI),
+      dist_pos(0.0, 1.0),
+      dist_sign(0, 1),
+      num_p(num_p),
+      active_p(num_p),
+      num_v(num_v),
+      E_i(E_i),
+      active(num_p, true),
+      particle_type(particle_type)
 {
     if (particle_type == PARTICLE_TYPE::BUMPY && num_v < 2) {
         throw std::runtime_error("System CONSTRUCTOR: Bumpy particles require at least 2 vertices.");
     }
 
     adj_contacts.setZero();
-    id = get_id();
 
+    // --- STEP 1: Create particles ---
     particles.reserve(num_p);
-    for (size_t i = 0; i < num_p; i++) {
+    for (size_t i = 0; i < num_p; ++i) {
         switch (particle_type) {
             case PARTICLE_TYPE::SMOOTH:
                 particles.push_back(std::make_unique<SmoothParticle>(this, i));
@@ -44,93 +39,131 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
         }
     }
 
-    for (size_t curr_attempt = 0; curr_attempt < MAX_ATTEMPTS; curr_attempt++) {
+    // --- STEP 2: Now that particles exist, calculate sigma and setup cell list ---
+    r_cut = 2.5 * (1.0 + get_sigma());
+    r_skin = 0.5 * get_sigma();
+    num_cells_per_dim = static_cast<size_t>(std::floor(L / (r_cut + r_skin)));
+    cell_size = L / num_cells_per_dim;
+
+    cell_bins = std::vector<std::vector<size_t>>(num_cells_per_dim * num_cells_per_dim);
+    neighbor_list = std::vector<std::vector<size_t>>(num_p);
+    verlet_displacements = std::vector<Eigen::Vector2d>(num_p, Eigen::Vector2d::Zero());
+
+    // --- STEP 3: Generate random non-overlapping config ---
+    random_nonoverlap_config();
+    grow_to_phi(phi);
+    set_ke(E_i - get_pe());
+}
+
+void System::random_nonoverlap_config () {
+    for (size_t attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
         for (auto& p : particles) {
             p->randomize_position();
         }
 
         rescale(INIT_PHI);
-        if (get_pe() == 0.0) break;
+
+        if (get_pe() == 0.0) return;
     }
 
-    grow_to_phi(phi);
-
-    // double interaction_radius = 2.0 * get_radius();
-    double interaction_radius = 2.0 * 1.0;
-    verlet_skin_radius = 0.4 * interaction_radius;
-    double verlet_cutoff = interaction_radius + verlet_skin_radius;
-    verlet_cutoff_sq = verlet_cutoff * verlet_cutoff;
-
-    cell_list = std::make_unique<CellList>(this, verlet_cutoff);
-    // build_verlet_list();
-
-    if (E_i < get_pe()) {
-        throw std::runtime_error("System CONSTRUCTOR: Energy minimum is greater than requested initial energy. Try a lower packing fraction.");
-    }
-
-    set_temp(E_i - get_pe());
+    throw std::runtime_error("Failed to generate initial non-overlapping configuration.");
 }
-
-System::~System() = default;
 
 double System::get_sigma () {
-    return particles[0]->sigma;
-}
-
-void System::apply_pbc_to_vector (Eigen::Vector2d& vec) const {
-    vec.x() -= 1 * std::round(vec.x() / 1);
-    vec.y() -= 1 * std::round(vec.y() / 1);
-}
-
-Eigen::Vector2d System::get_min_dist_vec (const Particle* p1, const Particle* p2) const {
-    Eigen::Vector2d dr = p2->com - p1->com;
-    apply_pbc_to_vector(dr);
-    return dr;
-}
-
-void System::build_verlet_list () {
-    cell_list->build();
-    verlet_list.clear();
-
-    std::vector<int> neighbor_cells;
     for (size_t i = 0; i < num_p; i++) {
+        if (active[i]) return particles[i]->sigma;
+    }
+    return 0;
+}
+
+inline Eigen::Vector2d minimum_image (const Eigen::Vector2d& vec, double L) {
+    return vec - L * (vec / L).array().round().matrix();
+}
+
+size_t System::get_flat_cell_index (const Eigen::Vector2d& pos) const {
+    Eigen::Vector2d wrapped = pos;
+    wrapped[0] = fmod(wrapped[0], L);
+    wrapped[1] = fmod(wrapped[1], L);
+    if (wrapped[0] < 0) wrapped[0] += L;
+    if (wrapped[1] < 0) wrapped[1] += L;
+
+    size_t x = static_cast<size_t>(wrapped[0] / cell_size);
+    size_t y = static_cast<size_t>(wrapped[1] / cell_size);
+
+    if (x >= num_cells_per_dim) x = num_cells_per_dim - 1;
+    if (y >= num_cells_per_dim) y = num_cells_per_dim - 1;
+
+    return y * num_cells_per_dim + x;
+}
+
+std::vector<size_t> System::get_neighboring_cells (size_t flat_index) const {
+    std::vector<size_t> neighbors;
+    size_t cx = flat_index % num_cells_per_dim;
+    size_t cy = flat_index / num_cells_per_dim;
+    for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            size_t nx = (cx + dx + num_cells_per_dim) % num_cells_per_dim;
+            size_t ny = (cy + dy + num_cells_per_dim) % num_cells_per_dim;
+            neighbors.push_back(ny * num_cells_per_dim + nx);
+        }
+    }
+
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+
+    return neighbors;
+}
+
+void System::rebuild_cell_list () {
+    for (auto& bin : cell_bins) bin.clear();
+
+    for (size_t i = 0; i < num_p; ++i) {
+        if (!active[i]) continue;
+        size_t cell_idx = get_flat_cell_index(particles[i]->com);
+        cell_bins[cell_idx].push_back(i);
+    }
+}
+
+void System::rebuild_neighbor_list () {
+    rebuild_cell_list();
+
+    for (size_t i = 0; i < num_p; ++i) {
+        neighbor_list[i].clear();
+        verlet_displacements[i].setZero();
+    }
+
+    for (size_t i = 0; i < num_p; ++i) {
         if (!active[i]) continue;
 
-        int cell_idx = cell_list->get_cell_index(particles[i]->com);
-        cell_list->get_neighbor_cells(cell_idx, neighbor_cells);
+        size_t my_cell = get_flat_cell_index(particles[i]->com);
+        auto neighbor_cells = get_neighboring_cells(my_cell);
 
-        for (int neighbor_cell_idx : neighbor_cells) {
-            for (size_t j : cell_list->get_particles_in_cell(neighbor_cell_idx)) {
-                if (i >= j || !active[j]) continue;
+        for (size_t cid : neighbor_cells) {
+            for (size_t j : cell_bins[cid]) {
+                if (j <= i) continue;
+                if (!active[j]) continue;
 
-                Eigen::Vector2d dr = get_min_dist_vec(particles[i].get(), particles[j].get());
-                if (dr.squaredNorm() < verlet_cutoff_sq) {
-                    verlet_list.emplace_back(i, j);
+                Eigen::Vector2d dx = minimum_image(particles[j]->com - particles[i]->com, L);
+
+                if (dx.squaredNorm() < (r_cut + r_skin) * (r_cut + r_skin)) {
+                    neighbor_list[i].push_back(j);
+                    // neighbor_list[j].push_back(i);
                 }
             }
         }
     }
-
-    std::fill(verlet_displacements.begin(), verlet_displacements.end(), Eigen::Vector2d::Zero());
-    rebuild_verlet_list = false;
 }
-
-void System::check_verlet_rebuild () {
-    if (rebuild_verlet_list) return;
-
-    double max_disp_sq = 0.0;
-    for (size_t i = 0; i < num_p; i++) {
-        if (active[i]) {
-            max_disp_sq = std::max(max_disp_sq, verlet_displacements[i].squaredNorm());
+bool System::neighbor_list_invalid () const {
+    double max_disp_sq = (0.5 * r_skin) * (0.5 * r_skin);
+    for (size_t i = 0; i < num_p; ++i) {
+        if (!active[i]) continue;
+        if (verlet_displacements[i].squaredNorm() > max_disp_sq) {
+            return true;
         }
     }
-
-    if (max_disp_sq * 4.0 > verlet_skin_radius * verlet_skin_radius) {
-        rebuild_verlet_list = true;
-    }
+    return false;
 }
-
-void System::rescale (double _phi) {
+double System::rescale (double _phi) {
     phi = _phi;
     double old_L = L;
     double p_area = get_particle_area();
@@ -142,19 +175,21 @@ void System::rescale (double _phi) {
         p->rescale_ratio(ratio);
     }
 
-    // double interaction_radius = 2.5 * get_sigma();
-    // verlet_skin_radius = 0.4 * interaction_radius;
-    // double verlet_cutoff = interaction_radius + verlet_skin_radius;
-    // verlet_cutoff_sq = verlet_cutoff * verlet_cutoff;
-    //
-    // cell_list = std::make_unique<CellList>(this, verlet_cutoff);
-    // rebuild_verlet_list = true;
+    num_cells_per_dim = static_cast<size_t>(std::floor(L / (r_cut + r_skin)));
+    cell_size = L / num_cells_per_dim;
+    if (num_cells_per_dim == 0) {
+        num_cells_per_dim = 1;
+    }
+    cell_bins.clear();
+    cell_bins.resize(num_cells_per_dim * num_cells_per_dim);
+    rebuild_neighbor_list();
+
+    return ratio;
 }
 
-void System::set_temp (double temp) {
-    LOG_WARNING << "setting temperature doesn't rescale; it regenerates heading and stuff";
+void System::set_ke (double ke) {
     for (auto& p : particles) {
-        p->set_ke(temp);
+        p->set_ke(ke);
     }
 }
 
@@ -174,27 +209,31 @@ void System::relax () {
 }
 
 void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start, size_t n_min, double force_tol) {
+    // to check
     double alpha = alpha_start;
     double dt_fire = 0.1 * dt_max;
     size_t N_pos = 0;
 
-    std::vector<Eigen::Vector2d> vels(num_p);
-    for (size_t i = 0; i < num_p; i++) if (active[i]) {
-        vels[i] = Eigen::Vector2d(0, 0);
-    }
+    std::vector<Eigen::Vector2d> vels(num_p, Eigen::Vector2d::Zero());
 
+    // --- Initial force computation ---
     N_c = 0;
     for (size_t i = 0; i < num_p; i++) if (active[i]) {
         particles[i]->reset_dynamics();
     }
+
+    if (neighbor_list_invalid())
+        rebuild_neighbor_list();
+
+    std::vector<Eigen::Triplet<double>> new_contacts;
     for (size_t i = 0; i < num_p; i++) if (active[i]) {
-        auto &p1 = particles[i];
-        for (size_t j = i + 1; j < num_p; j++) if (active[j]) {
-            auto &p2 = particles[j];
-            p1->interact(p2.get());
+        for (size_t j : neighbor_list[i]) if (active[j] && j > i) {
+            particles[i]->interact(particles[j].get(), new_contacts);
         }
     }
+    adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
 
+    // --- Main FIRE loop ---
     for (size_t step = 0; step < max_steps; ++step) {
         double P = 0.0;
         double force_norm_sq = 0.0;
@@ -208,9 +247,7 @@ void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start,
 
         double force_norm = std::sqrt(force_norm_sq);
 
-        if (force_norm < force_tol) {
-            break;
-        }
+        if (force_norm < force_tol) break;
 
         if (P <= 0) {
             N_pos = 0;
@@ -219,47 +256,55 @@ void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start,
             for (size_t i = 0; i < num_p; ++i) if (active[i]) {
                 vels[i].setZero();
             }
-        }
-        else {
+        } else {
             N_pos++;
             if (N_pos > n_min) {
                 dt_fire = std::min(dt_fire * 1.1, dt_max);
                 alpha *= 0.99;
             }
 
-            double total_system_velocity_magnitude = std::sqrt(velocity_norm_sq);
+            double total_vel_mag = std::sqrt(velocity_norm_sq);
             for (size_t i = 0; i < num_p; ++i) if (active[i]) {
                 if (force_norm > 1e-12) {
-                     vels[i] = (1.0 - alpha) * vels[i] + alpha * (particles[i]->force / force_norm) * total_system_velocity_magnitude;
-                }
-                else {
-                     vels[i] = Eigen::Vector2d(0, 0);
+                    vels[i] = (1.0 - alpha) * vels[i] +
+                              alpha * (particles[i]->force / force_norm) * total_vel_mag;
+                } else {
+                    vels[i].setZero();
                 }
             }
         }
 
+        // --- Position update ---
         for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            Eigen::Vector2d acc_i = particles[i]->force / num_v;
-            auto d_trans = vels[i] * dt_fire + 0.5 * acc_i * dt_fire * dt_fire;
+            Eigen::Vector2d acc_i = particles[i]->force / particles[i]->get_mass();
+            Eigen::Vector2d d_trans = vels[i] * dt_fire + 0.5 * acc_i * dt_fire * dt_fire;
+            verlet_displacements[i] += d_trans;  // track for neighbor list rebuild
             particles[i]->move(d_trans);
             vels[i] += 0.5 * acc_i * dt_fire;
         }
 
+        // --- Recompute forces ---
         N_c = 0;
         for (size_t i = 0; i < num_p; i++) if (active[i]) {
             particles[i]->reset_dynamics();
         }
-        for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            auto &p1 = particles[i];
-            for (size_t j = i + 1; j < num_p; j++) if (active[j]) {
-                auto &p2 = particles[j];
-                p1->interact(p2.get());
-            }
+
+        if (neighbor_list_invalid()) {
+            rebuild_neighbor_list();
         }
 
+        std::vector<Eigen::Triplet<double>> new_contacts;
+        for (size_t i = 0; i < num_p; i++) if (active[i]) {
+            for (size_t j : neighbor_list[i]) if (active[j] && j > i) {
+                particles[i]->interact(particles[j].get(), new_contacts);
+            }
+        }
+        adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
+
+        // --- Velocity update ---
         for (size_t i = 0; i < num_p; ++i) if (active[i]) {
-            Eigen::Vector2d new_acc_i = particles[i]->force / num_v;
-            vels[i] += 0.5 * new_acc_i * dt_fire;
+            Eigen::Vector2d new_acc = particles[i]->force / particles[i]->get_mass();
+            vels[i] += 0.5 * new_acc * dt_fire;
         }
     }
 }
@@ -267,97 +312,80 @@ void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start,
 void System::grow_to_phi (double _phi) {
     for (double curr_phi = phi; curr_phi <= _phi + EPS; curr_phi += i_d_phi) {
         rescale(curr_phi);
+        fire_minimize();
     }
     rescale(_phi);
+    fire_minimize();
 }
 
 void System::send_to_jamming () {
-    fire_minimize();
-
-    double d_phi = i_d_phi;
-
-    double pe = get_pe();
-    double last_pe = pe;
-
-    while (pe < PE_tol || pe > 1.01 * PE_tol) {
-        if (
-            (pe < PE_tol && last_pe > 1.01 * PE_tol) ||
-            (pe > 1.01 * PE_tol && last_pe < PE_tol)
-        ) {
-            if (d_phi * 0.5 < d_phi_min) {
-                if (pe < PE_tol) {
-                    rescale(phi + d_phi);
-                    fire_minimize();
-                }
-                return;
-            }
-            else {
-                d_phi *= 0.5;
-            }
-        }
-
-        if (pe < PE_tol)
-            rescale(phi + d_phi);
-        else
-            rescale(phi - d_phi);
-
+    while (true) {
         fire_minimize();
 
-        last_pe = pe;
-        pe = get_pe();
-    }
-}
+        double d_phi = i_d_phi;
+        double pe = get_pe();
+        double last_pe = pe;
 
-void System::update () {
-    N_c = 0;
-    for (auto &p : particles) {
-        p->reset_dynamics();
-        p->update();
-    }
+        while (pe < PE_tol || pe > 1.01 * PE_tol) {
+            if (
+                (pe < PE_tol && last_pe > 1.01 * PE_tol) ||
+                (pe > 1.01 * PE_tol && last_pe < PE_tol)
+            ) {
+                if (d_phi * 0.5 < d_phi_min) {
+                    if (pe < PE_tol) {
+                        rescale(phi + d_phi);
+                        fire_minimize();
+                    }
+                    break;
+                }
+                else {
+                    d_phi *= 0.5;
+                }
+            }
 
-    for (size_t i = 0; i < num_p; i++) if (active[i]) {
-        auto &p1 = particles[i];
-        for (size_t j = i + 1; j < num_p; j++) if (active[j]) {
-            auto &p2 = particles[j];
-            p1->interact(p2.get());
+            if (pe < PE_tol)
+                rescale(phi + d_phi);
+            else
+                rescale(phi - d_phi);
+
+            fire_minimize();
+            last_pe = pe;
+            pe = get_pe();
+        }
+
+        size_t rattlers = remove_rattlers();
+        if (rattlers == 0) {
+            break;
         }
     }
+}
+void System::update () {
+    N_c = 0;
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        auto old_pos = particles[i]->com;
+        particles[i]->reset_dynamics();
+        particles[i]->update();
+        verlet_displacements[i] += particles[i]->com - old_pos;
+    }
 
-    for (auto &p : particles) {
-        if (relaxing) p->apply_drag(RELAX_KD);
-        p->integrate();
+    if (neighbor_list_invalid()) {
+        rebuild_neighbor_list();
+    }
+
+    std::vector<Eigen::Triplet<double>> new_contacts;
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        for (size_t j : neighbor_list[i]) if (active[j] && j > i) {
+            particles[i]->interact(particles[j].get(), new_contacts);
+        }
+    }
+    adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
+
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        if (relaxing) particles[i]->apply_drag(RELAX_KD);
+        particles[i]->integrate();
     }
 
     time += dt;
-
-    // check_verlet_rebuild();
-    // if (rebuild_verlet_list) {
-    //     build_verlet_list();
-    // }
-    //
-    // N_c = 0;
-    // for (auto &p : particles) {
-    //     p->reset_dynamics();
-    //     p->update();
-    // }
-    //
-    // for (const auto& pair : verlet_list) {
-    //     auto &p1 = particles[pair.first];
-    //     auto &p2 = particles[pair.second];
-    //     if (active[p1->id] && active[p2->id]) {
-    //         p1->interact(p2.get());
-    //     }
-    // }
-    //
-    // for (size_t i = 0; i < num_p; i++) if (active[i]) {
-    //     auto& p = particles[i];
-    //     Eigen::Vector2d old_pos = p->com;
-    //     if (relaxing) p->apply_drag(RELAX_KD);
-    //     p->integrate();
-    //     verlet_displacements[i] += p->com - old_pos;
-    // }
-    //
-    // time += dt;
 }
 
 double System::get_ke () {
@@ -369,58 +397,139 @@ double System::get_ke () {
 }
 
 double System::get_pe () {
-    double re = 0.0;
-    for (size_t i = 0; i < num_p; i++) if (active[i]) {
-        auto &p1 = particles[i];
-        for (size_t j = i + 1; j < num_p; j++) if (active[j]) {
-            auto &p2 = particles[j];
-            re += p1->get_energy_interaction(p2.get());
+    double pe = 0.0;
+
+    if (neighbor_list_invalid()) {
+        rebuild_neighbor_list();
+    }
+
+    for (size_t i = 0; i < num_p; ++i) {
+        if (!active[i]) continue;
+        for (size_t j : neighbor_list[i]) {
+            if (!active[j] || j <= i) continue;
+            pe += particles[i]->get_energy_interaction(particles[j].get());
         }
     }
 
-    return re / num_p;
+    return pe / num_p;
 }
 
-void System::remove_rattlers () {
+size_t System::remove_rattlers () {
+    size_t rattlers_found = 0;
     for (size_t i = 0; i < num_p; i++) {
-        if (particles[i]->rattles()) {
+        if (active[i] && particles[i]->rattles()) {
             active[i] = false;
+            rattlers_found++;
+            active_p--;
         }
     }
-}
-
-size_t System::get_id () {
-    curr_id.fetch_add(1);
-    return curr_id.load() - 1;
+    phi = get_particle_area() / L / L;
+    return rattlers_found;
 }
 
 double System::get_particle_area () {
     double area = 0.0;
-    for (auto& p : particles) {
-        area += p->get_area();
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        area += particles[i]->area;
     }
     return area;
 }
 
 std::vector<double> System::get_verts () const {
-    // TODO: Fix me
-    LOG_WARNING << "Using get_verts() is currently not advised because it has troubles when removing rattlers";
-    std::vector<double> vertex_data(num_p * num_v * 2);
+    std::vector<double> vertex_data;
 
-    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+    size_t verts_per_particle = (particle_type == PARTICLE_TYPE::SMOOTH) ? 1 : num_v;
+    vertex_data.reserve(active_p * verts_per_particle * 2);
+
+    for (size_t i = 0; i < num_p; i++) {
+        if (!active[i]) continue; // Skip inactive particles
+
         if (auto* smooth = dynamic_cast<SmoothParticle*>(particles[i].get())) {
-            size_t idx = i * 2;
-            vertex_data[idx + 0] = smooth->com[0];
-            vertex_data[idx + 1] = smooth->com[1];
+            vertex_data.push_back(smooth->com[0]);
+            vertex_data.push_back(smooth->com[1]);
         }
         else if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
-            for (int v = 0; v < num_v; v++) {
-                size_t idx = (i * num_v + v) * 2;
-                vertex_data[idx + 0] = bumpy->verts[v][0];
-                vertex_data[idx + 1] = bumpy->verts[v][1];
+            for (size_t v = 0; v < num_v; v++) {
+                vertex_data.push_back(bumpy->verts[v][0]);
+                vertex_data.push_back(bumpy->verts[v][1]);
             }
         }
     }
 
     return vertex_data;
+}
+size_t System::purge_rattlers () {
+    // Determine how many particles need to be removed.
+    const size_t particles_to_remove_count = num_p - active_p;
+
+    if (particles_to_remove_count == 0) {
+        return 0; // Nothing to do, all particles are active.
+    }
+
+    // --- STEP 1: Create a map from old particle indices to new ones ---
+    // This map is essential for rebuilding the contact matrix correctly.
+    std::vector<size_t> old_to_new_map(num_p);
+    size_t new_idx = 0;
+    for (size_t i = 0; i < num_p; ++i) {
+        if (active[i]) {
+            old_to_new_map[i] = new_idx++;
+        }
+    }
+
+    // --- STEP 2: Preserve the contacts between particles that are being kept ---
+    std::vector<Eigen::Triplet<double>> kept_contacts;
+    kept_contacts.reserve(adj_contacts.nonZeros());
+
+    // Iterate through all non-zero elements of the old sparse matrix.
+    for (int k = 0; k < adj_contacts.outerSize(); ++k) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(adj_contacts, k); it; ++it) {
+            size_t old_p_row = it.row() / num_v;
+            size_t old_p_col = it.col() / num_v;
+
+            // Keep a contact only if both particles involved were active.
+            if (active[old_p_row] && active[old_p_col]) {
+                size_t new_p_row = old_to_new_map[old_p_row];
+                size_t new_p_col = old_to_new_map[old_p_col];
+
+                size_t new_row = new_p_row * num_v + (it.row() % num_v);
+                size_t new_col = new_p_col * num_v + (it.col() % num_v);
+
+                kept_contacts.emplace_back(new_row, new_col, it.value());
+            }
+        }
+    }
+
+    // --- STEP 3: Create the new, smaller vector of particles ---
+    std::vector<std::unique_ptr<Particle>> kept_particles;
+    kept_particles.reserve(active_p); // Reserve space for the particles we are keeping.
+    for (size_t i = 0; i < num_p; ++i) {
+        if (active[i]) {
+            kept_particles.push_back(std::move(particles[i]));
+        }
+    }
+    particles = std::move(kept_particles);
+
+    // --- STEP 4: Update all system counters and data structures ---
+    num_p = active_p; // The new total number of particles is the old active count.
+
+    // Resize and rebuild the contact matrix from the preserved contacts.
+    adj_contacts.resize(num_v * num_p, num_v * num_p);
+    adj_contacts.setFromTriplets(kept_contacts.begin(), kept_contacts.end());
+
+    // Re-initialize lists for the new size. All remaining particles are now active.
+    active = std::vector<bool>(num_p, true);
+    neighbor_list = std::vector<std::vector<size_t>>(num_p);
+    verlet_displacements = std::vector<Eigen::Vector2d>(num_p, Eigen::Vector2d::Zero());
+
+    // Re-assign particle IDs to be contiguous from 0 to num_p-1.
+    for (size_t i = 0; i < num_p; ++i) {
+        particles[i]->id = i;
+    }
+
+    // The neighbor list must be rebuilt from scratch with the new indices.
+    rebuild_neighbor_list();
+
+    phi = get_particle_area() / L / L;
+
+    return particles_to_remove_count;
 }

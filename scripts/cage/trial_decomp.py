@@ -1,11 +1,13 @@
 import subprocess
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
 
 # Configuration
 num_runs = 10
-mu_values = [0.3, 0.35, 0.4, 0.45, 0.5]
-base_output_dir = "runs/cage3"
+# mu_values = [0.0, 0.001, 0.00316227766, 0.01, 0.0316227766, 0.1, 0.31622776601, 1]
+mu_values = sys.argv[1]
+base_output_dir = "../runs/cage"
 command_base = "./bin/iter_decomp"
 max_parallel = 4  # Number of parallel threads per mu
 
@@ -13,7 +15,7 @@ max_parallel = 4  # Number of parallel threads per mu
 base_args = [
     "--bumpy",
     "--nv", "8",
-    "--np", "20",
+    "--np", "16",
     "--points", "100000",
     "--dt", "0.001",
     "--dphi", "0.01",
