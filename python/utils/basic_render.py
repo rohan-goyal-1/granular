@@ -21,7 +21,7 @@ with h5py.File(FILE, 'r') as f:
 
 # === BASIC INFO ===
 num_particles, num_verts, _ = frames[0].shape
-box_length = 9.13391852902415557
+box_length = 15.38551506799709045
 
 # === FIGURE SETUP ===
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -128,7 +128,7 @@ def animate(frame_idx):
 
     # NEW: Print warning for undercoordinated particles
     for pi, count in contact_count.items():
-        if count < 3:
+        if count < 4:
             print(f"WARNING: Particle {pi} has only {count} contacts at frame {frame_idx}")
 
     contact_lines.set_segments(segments)

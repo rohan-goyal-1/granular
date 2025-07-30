@@ -112,7 +112,7 @@ int main (int argc, char** argv) {
         vertex_data.push_back(sys.particles[i]->theta);
     }
     logger.write_dataset("/vertices", {sys.num_p, 3}, vertex_data);
-    logger.write_attribute("/vertices", "sigma", sys.get_sigma());
+    logger.write_attribute("/vertices", "sigma", (p_type == PARTICLE_TYPE::BUMPY ? sys.get_sigma() : 2.0));
 
     // --- Cage and Sample Point Generation ---
     std::vector<std::vector<Eigen::Vector2d>> all_cages(sys.num_p);
@@ -175,7 +175,7 @@ int main (int argc, char** argv) {
     // --- Decompression Steps ---
     std::vector<double> delta_phis = {0.0};
     if (num_steps > 1) {
-        double log_min = std::min(std::log10(d_phi), -6.0);
+        double log_min = std::min(std::log10(d_phi), -5.0);
         double log_max = std::log10(d_phi);
         double log_step = (log_max - log_min + 1) / (num_steps - 1);
         for (size_t i = 1; i < num_steps; ++i) {

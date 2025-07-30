@@ -38,11 +38,12 @@ public:
     double get_ke(void);
     double get_pe(void);
     void set_ke(double ke);
+    void set_energy(double E);
+    double calc_phi(void);
     double rescale(double _phi);
     void grow_to_phi(double _phi);
     inline bool is_relaxed(void);
     void relax(void);
-    void fire_minimize(size_t max_steps = 10000, double dt_max = 1e-2, double alpha_start = 0.1, size_t n_min = 5, double force_tol = 1e-10);
     void send_to_jamming(void);
     size_t remove_rattlers(void);
     size_t purge_rattlers(void);
@@ -74,11 +75,11 @@ public:
     std::vector<std::unique_ptr<Particle>> particles;
     std::vector<bool> active;
     const size_t MAX_ATTEMPTS = 1E4;
-    const double i_d_phi = 1E-2;
+    const double i_d_phi = 1E-3;
     const double d_phi_min = 1E-8;
     static constexpr double INIT_PHI = 1E-4;
     const double KE_tol = 1E-20;
-    const double PE_tol = 1E-10;
+    const double PE_tol = 1E-16;
     const size_t MIN_STEPS = 100;
     const PARTICLE_TYPE particle_type;
     const double RELAX_KD = 10.0;
@@ -100,6 +101,22 @@ public:
 
     size_t get_flat_cell_index(const Eigen::Vector2d& pos) const;
     std::vector<size_t> get_neighboring_cells(size_t flat_index) const;
+
+    void set_last_state(void);
+    void revert_to_last_state(void);
+    std::vector<Eigen::Vector2d> last_state_coms;
+    std::vector<double> last_state_thetas;
+    double last_state_L;
+
+    void make_contact_network();
+
+    double get_fire_power();
+    void set_velocities_to_zero();
+    void fire_velocity_update(double dt_half);
+    void fire_mix_velocity_and_force(double alpha);
+    void fire_position_update(double dt);
+    void recalculate_forces_and_energy();
+    void fire_minimize(size_t max_steps = 1e6, double dt_fire = 1e-2, double alpha_start = 0.1, size_t n_min = 5);
 
 private:
 

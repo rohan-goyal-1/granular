@@ -52,7 +52,6 @@ System::System (PARTICLE_TYPE particle_type, size_t num_p, size_t num_v, double 
     // --- STEP 3: Generate random non-overlapping config ---
     random_nonoverlap_config();
     grow_to_phi(phi);
-    set_ke(E_i - get_pe());
 }
 
 void System::random_nonoverlap_config () {
@@ -163,6 +162,12 @@ bool System::neighbor_list_invalid () const {
     }
     return false;
 }
+
+double System::calc_phi () {
+    phi = get_particle_area() / L / L;
+    return phi;
+}
+
 double System::rescale (double _phi) {
     phi = _phi;
     double old_L = L;
@@ -187,6 +192,14 @@ double System::rescale (double _phi) {
     return ratio;
 }
 
+void System::set_energy (double E) {
+    double pe = get_pe();
+    if (E < pe) {
+        LOG_WARNING << "Potential energy is too high; cannot set total energy that low";
+    }
+    set_ke(E - pe);
+}
+
 void System::set_ke (double ke) {
     for (auto& p : particles) {
         p->set_ke(ke);
@@ -208,22 +221,127 @@ void System::relax () {
     relaxing = false;
 }
 
-void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start, size_t n_min, double force_tol) {
-    // to check
-    double alpha = alpha_start;
-    double dt_fire = 0.1 * dt_max;
-    size_t N_pos = 0;
+void System::set_last_state () {
+    last_state_coms.resize(num_p);
+    last_state_thetas.resize(num_p);
 
-    std::vector<Eigen::Vector2d> vels(num_p, Eigen::Vector2d::Zero());
+    for (size_t i = 0; i < num_p; ++i) {
+        last_state_coms[i] = particles[i]->com;
+        last_state_thetas[i] = particles[i]->theta;
+    }
+    last_state_L = L;
+}
 
-    // --- Initial force computation ---
-    N_c = 0;
+void System::revert_to_last_state () {
+    L = last_state_L;
+    for (size_t i = 0; i < num_p; ++i) {
+        particles[i]->com = last_state_coms[i];
+        particles[i]->theta = last_state_thetas[i];
+    }
+
+    phi = get_particle_area() / (L * L);
+
+    num_cells_per_dim = static_cast<size_t>(std::floor(L / (r_cut + r_skin)));
+    cell_size = L / num_cells_per_dim;
+    if (num_cells_per_dim == 0) {
+        num_cells_per_dim = 1;
+    }
+    cell_bins.clear();
+    cell_bins.resize(num_cells_per_dim * num_cells_per_dim);
+
+    rebuild_neighbor_list();
+}
+
+double System::get_fire_power() {
+    double power = 0.0;
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        power += particles[i]->force.dot(particles[i]->com_v);
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            power += bumpy->torque * bumpy->ang_v;
+        }
+    }
+    return power;
+}
+
+void System::set_velocities_to_zero() {
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        particles[i]->com_v.setZero();
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            bumpy->ang_v = 0.0;
+        }
+    }
+}
+
+void System::fire_velocity_update(double dt_half) {
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        particles[i]->com_v += (particles[i]->force / particles[i]->get_mass()) * dt_half;
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            // Make sure BumpyParticle has a public 'moi' member or getter
+            bumpy->ang_v += (bumpy->torque / bumpy->moi) * dt_half;
+        }
+    }
+}
+
+void System::fire_mix_velocity_and_force(double alpha) {
+    // Loop through each particle to apply the mixing rule individually
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        // --- Translational Part ---
+        Eigen::Vector2d& v = particles[i]->com_v;
+        const Eigen::Vector2d& f = particles[i]->force;
+
+        double f_norm = f.norm();
+        double v_norm = v.norm();
+
+        if (f_norm > 1e-20) {
+            // v_new = (1-α)v + α * v_norm * (f / f_norm)
+            // This is algebraically equivalent to: v_new = v * (1-α) + f * (v_norm / f_norm * α)
+            double mixing_ratio = v_norm / f_norm * alpha;
+            v = v * (1.0 - alpha) + f * mixing_ratio;
+        } else {
+            // If there's no force, there's no direction to steer; kill velocity.
+            v.setZero();
+        }
+
+        // --- Rotational Part ---
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            double& w = bumpy->ang_v;
+            const double& tau = bumpy->torque;
+
+            double tau_norm = std::abs(tau);
+            double w_norm = std::abs(w);
+
+            if (tau_norm > 1e-20) {
+                double mixing_ratio = w_norm / tau_norm * alpha;
+                w = w * (1.0 - alpha) + tau * mixing_ratio;
+            } else {
+                // If there's no torque, kill angular velocity.
+                w = 0.0;
+            }
+        }
+    }
+}
+
+void System::fire_position_update(double dt) {
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        Eigen::Vector2d d_trans = particles[i]->com_v * dt;
+        verlet_displacements[i] += d_trans; // Important for neighbor list
+        particles[i]->move(d_trans);
+
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            double d_theta = bumpy->ang_v * dt;
+            bumpy->rotate(d_theta);
+        }
+    }
+}
+
+void System::recalculate_forces_and_energy() {
     for (size_t i = 0; i < num_p; i++) if (active[i]) {
         particles[i]->reset_dynamics();
     }
 
-    if (neighbor_list_invalid())
+    if (neighbor_list_invalid()) {
         rebuild_neighbor_list();
+    }
 
     std::vector<Eigen::Triplet<double>> new_contacts;
     for (size_t i = 0; i < num_p; i++) if (active[i]) {
@@ -232,81 +350,74 @@ void System::fire_minimize (size_t max_steps, double dt_max, double alpha_start,
         }
     }
     adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
+}
 
-    // --- Main FIRE loop ---
-    for (size_t step = 0; step < max_steps; ++step) {
-        double P = 0.0;
-        double force_norm_sq = 0.0;
-        double velocity_norm_sq = 0.0;
+void System::fire_minimize (size_t max_steps, double dt_fire, double alpha_start, size_t n_min) {
+    // --- FIRE Parameters ---
+    double alpha = alpha_start;
+    const double dt_fire_max = 10.0 * dt_fire;
+    const double dt_fire_min = 1e-3 * dt_fire;
+    const double f_inc = 1.1;
+    const double f_dec = 0.5;
+    const double f_alpha = 0.99;
+    size_t N_pos = 0, N_neg = 0;
+    const size_t N_neg_max = 10;
 
-        for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            P += vels[i].dot(particles[i]->force);
-            force_norm_sq += particles[i]->force.squaredNorm();
-            velocity_norm_sq += vels[i].squaredNorm();
-        }
+    // --- Convergence Parameters ---
+    double pe_previous = std::numeric_limits<double>::max();
 
-        double force_norm = std::sqrt(force_norm_sq);
+    // --- Initial State ---
+    set_velocities_to_zero();
+    recalculate_forces_and_energy();
+    double pe_current = get_pe();
 
-        if (force_norm < force_tol) break;
+    size_t step = 0;
+    // --- Main FIRE Loop ---
+    for (step = 0; step < max_steps; ++step) {
+        // --- 1. Check for Convergence ---
+        if (pe_current < PE_tol || std::abs(pe_current / pe_previous - 1.0) < PE_tol) break; // Converged if PE is near zero
 
-        if (P <= 0) {
-            N_pos = 0;
-            dt_fire *= 0.5;
-            alpha = alpha_start;
-            for (size_t i = 0; i < num_p; ++i) if (active[i]) {
-                vels[i].setZero();
-            }
-        } else {
+        // --- 2. FIRE Power-Based Logic ---
+        double power = get_fire_power();
+        if (power > 0) { // Moving downhill: accelerate
             N_pos++;
+            N_neg = 0;
             if (N_pos > n_min) {
-                dt_fire = std::min(dt_fire * 1.1, dt_max);
-                alpha *= 0.99;
-            }
-
-            double total_vel_mag = std::sqrt(velocity_norm_sq);
-            for (size_t i = 0; i < num_p; ++i) if (active[i]) {
-                if (force_norm > 1e-12) {
-                    vels[i] = (1.0 - alpha) * vels[i] +
-                              alpha * (particles[i]->force / force_norm) * total_vel_mag;
-                } else {
-                    vels[i].setZero();
-                }
+                dt_fire = std::min(dt_fire * f_inc, dt_fire_max);
+                alpha *= f_alpha;
             }
         }
-
-        // --- Position update ---
-        for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            Eigen::Vector2d acc_i = particles[i]->force / particles[i]->get_mass();
-            Eigen::Vector2d d_trans = vels[i] * dt_fire + 0.5 * acc_i * dt_fire * dt_fire;
-            verlet_displacements[i] += d_trans;  // track for neighbor list rebuild
-            particles[i]->move(d_trans);
-            vels[i] += 0.5 * acc_i * dt_fire;
-        }
-
-        // --- Recompute forces ---
-        N_c = 0;
-        for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            particles[i]->reset_dynamics();
-        }
-
-        if (neighbor_list_invalid()) {
-            rebuild_neighbor_list();
-        }
-
-        std::vector<Eigen::Triplet<double>> new_contacts;
-        for (size_t i = 0; i < num_p; i++) if (active[i]) {
-            for (size_t j : neighbor_list[i]) if (active[j] && j > i) {
-                particles[i]->interact(particles[j].get(), new_contacts);
+        else { // Moving uphill: stop, reverse, and reset
+            N_pos = 0;
+            N_neg++;
+            if (N_neg > N_neg_max) {
+                set_velocities_to_zero();
+                return;
             }
-        }
-        adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
+            dt_fire = std::max(dt_fire * f_dec, dt_fire_min);
+            alpha = alpha_start;
 
-        // --- Velocity update ---
-        for (size_t i = 0; i < num_p; ++i) if (active[i]) {
-            Eigen::Vector2d new_acc = particles[i]->force / particles[i]->get_mass();
-            vels[i] += 0.5 * new_acc * dt_fire;
+            fire_position_update(-dt_fire / 2.0);
+            set_velocities_to_zero();
         }
+
+        // --- 3. Modified Velocity-Verlet Integrator ---
+        fire_velocity_update(dt_fire / 2.0);      // v(t + dt/2)
+        fire_mix_velocity_and_force(alpha);       // FIRE's velocity steering
+        fire_position_update(dt_fire);            // x(t + dt)
+        recalculate_forces_and_energy();          // F(t + dt)
+        fire_velocity_update(dt_fire / 2.0);      // v(t + dt)
+
+        // Update energy for next iteration's convergence check
+        pe_previous = pe_current;
+        pe_current = get_pe();
     }
+    if (step >= max_steps) {
+        LOG_WARNING << "Max steps was set too small; FIRE wanted to go longer";
+    }
+
+    // --- Cleanup ---
+    set_velocities_to_zero();
 }
 
 void System::grow_to_phi (double _phi) {
@@ -318,47 +429,67 @@ void System::grow_to_phi (double _phi) {
     fire_minimize();
 }
 
-void System::send_to_jamming () {
-    while (true) {
+void System::send_to_jamming() {
+    const size_t max_compression_steps = 100000;
+
+    fire_minimize();
+
+    set_last_state();
+    double phi_low = phi;
+    double phi_high = -1.0;
+    double target_phi = phi;
+
+    size_t step = 0;
+    for (step = 0; step < max_compression_steps; ++step) {
         fire_minimize();
+        double pe_per_particle = get_pe();
 
-        double d_phi = i_d_phi;
-        double pe = get_pe();
-        double last_pe = pe;
+        if (pe_per_particle > PE_tol) {
+            phi_high = phi;
+            revert_to_last_state();
+            target_phi = (phi_high + phi_low) / 2.0;
+        }
+        else {
+            set_last_state();
+            phi_low = phi;
 
-        while (pe < PE_tol || pe > 1.01 * PE_tol) {
-            if (
-                (pe < PE_tol && last_pe > 1.01 * PE_tol) ||
-                (pe > 1.01 * PE_tol && last_pe < PE_tol)
-            ) {
-                if (d_phi * 0.5 < d_phi_min) {
-                    if (pe < PE_tol) {
-                        rescale(phi + d_phi);
-                        fire_minimize();
-                    }
-                    break;
-                }
-                else {
-                    d_phi *= 0.5;
-                }
+            if (phi_high > 0) {
+                target_phi = (phi_high + phi_low) / 2.0;
             }
-
-            if (pe < PE_tol)
-                rescale(phi + d_phi);
-            else
-                rescale(phi - d_phi);
-
-            fire_minimize();
-            last_pe = pe;
-            pe = get_pe();
+            else {
+                target_phi = phi + i_d_phi;
+            }
         }
 
-        size_t rattlers = remove_rattlers();
-        if (rattlers == 0) {
+        if (phi_high > 0 && std::fabs(phi_high / phi_low - 1.0) < d_phi_min) {
             break;
+            // auto is_stable = [&] () -> bool {
+            //     double pe = get_pe();
+            //     set_last_state();
+            //     rescale(calc_phi() + i_d_phi);
+            //     fire_minimize();
+            //     double pe2 = get_pe();
+            //     revert_to_last_state();
+            //     return pe2 > 0.1 * i_d_phi * i_d_phi;
+            // };
+            //
+            // bool stable = is_stable();
+            // if (stable) break;
+            //
+            // phi_low = phi;
+            // phi_high = -1.0;
+            // target_phi = calc_phi();
+            // set_last_state();
         }
+
+        rescale(target_phi);
     }
+    LOG_INFO << "Steps took: " << step + 1;
+
+    size_t num_ratt = remove_rattlers();
+    LOG_INFO << num_ratt;
 }
+
 void System::update () {
     N_c = 0;
     for (size_t i = 0; i < num_p; i++) if (active[i]) {
@@ -414,17 +545,38 @@ double System::get_pe () {
     return pe / num_p;
 }
 
-size_t System::remove_rattlers () {
-    size_t rattlers_found = 0;
-    for (size_t i = 0; i < num_p; i++) {
-        if (active[i] && particles[i]->rattles()) {
-            active[i] = false;
-            rattlers_found++;
-            active_p--;
+void System::make_contact_network () {
+    std::vector<Eigen::Triplet<double>> new_contacts;
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        for (size_t j : neighbor_list[i]) if (active[j] && j > i) {
+            particles[i]->interact(particles[j].get(), new_contacts);
         }
     }
-    phi = get_particle_area() / L / L;
-    return rattlers_found;
+    adj_contacts.setFromTriplets(new_contacts.begin(), new_contacts.end());
+
+    for (size_t i = 0; i < num_p; i++) if (active[i]) {
+        particles[i]->reset_dynamics();
+    }
+}
+
+size_t System::remove_rattlers () {
+    size_t total_rattlers = 0;
+    while (true) {
+        rebuild_neighbor_list();
+        make_contact_network();
+        size_t rattlers_found = 0;
+        for (size_t i = 0; i < num_p; i++) {
+            if (active[i] && particles[i]->rattles()) {
+                active[i] = false;
+                rattlers_found++;
+                active_p--;
+            }
+        }
+        phi = get_particle_area() / L / L;
+        total_rattlers += rattlers_found;
+        if (rattlers_found == 0) break;
+    }
+    return total_rattlers;
 }
 
 double System::get_particle_area () {
@@ -460,6 +612,7 @@ std::vector<double> System::get_verts () const {
 }
 size_t System::purge_rattlers () {
     // Determine how many particles need to be removed.
+    remove_rattlers();
     const size_t particles_to_remove_count = num_p - active_p;
 
     if (particles_to_remove_count == 0) {

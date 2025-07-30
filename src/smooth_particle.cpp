@@ -1,4 +1,5 @@
 #include "include/smooth_particle.h"
+#include <iostream>
 
 SmoothParticle::SmoothParticle (System* system, size_t id) :
     Particle(system, 0.0, id)

@@ -205,7 +205,7 @@ bool BumpyParticle::rattles () {
             count += system->adj_contacts.coeffRef(num_v * id + i, j);
         }
     }
-    return count < 3;
+    return count < 4;
 }
 
 void BumpyParticle::interact (Particle* other, std::vector<Eigen::Triplet<double>>& new_contacts) {
