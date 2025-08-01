@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <iomanip>
 #include <vector>
+#include <numeric>
+#include <memory> // Required for std::unique_ptr
 
+// Helper function to format strings with leading zeros
 std::string format_string (size_t i, size_t sz) {
     std::ostringstream oss;
     oss << std::setw(sz) << std::setfill('0') << i;
@@ -69,31 +72,62 @@ int main (int argc, char** argv) {
     LOG_INFO << "-----------------------------------------------------";
 
     HDF5Logger logger(output_file);
-    System sys(p_type, N, Nv, 0.0, dt, mu_eff);
+    std::unique_ptr<System> sys_ptr; // Use a pointer to manage the System object in the loop
 
-    // --- Jamming and Hard Rattler Purge ---
-    LOG_INFO << "Initializing system: sending to jamming point...";
-    sys.send_to_jamming();
-    double phi_j = sys.phi;
+    // --- Jamming and Soft Rattler Identification with Retry Logic ---
+    size_t num_active_particles = 0;
+    double phi_j = 0.0;
+    const size_t max_attempts = 15;
+    bool valid_config_found = false;
+
+    for (size_t attempt = 1; attempt <= max_attempts; ++attempt) {
+        LOG_INFO << "Attempt " << attempt << "/" << max_attempts << ": Initializing system and sending to jamming point...";
+        // Re-initialize the system for a fresh start
+        sys_ptr = std::make_unique<System>(p_type, N, Nv, 0.0, dt, mu_eff);
+
+        sys_ptr->send_to_jamming(); // This marks rattlers as inactive
+
+        num_active_particles = sys_ptr->active_p;
+        phi_j = sys_ptr->phi;
+
+        if (num_active_particles >= 2) {
+            LOG_INFO << "Success on attempt " << attempt << "! Found a valid configuration.";
+            valid_config_found = true;
+            break; // Exit the loop on success
+        } else {
+            LOG_WARNING << "Attempt " << attempt << " failed: Found only " << num_active_particles
+                        << " active particles. Retrying...";
+        }
+    }
+
+    if (!valid_config_found) {
+        LOG_ERROR << "Failed to find a configuration with at least 2 active particles after "
+                  << max_attempts << " attempts. Aborting simulation.";
+        return 1; // Exit with an error code
+    }
+
+    // Dereference the pointer for convenience. From here on, 'sys' behaves like the original object.
+    System& sys = *sys_ptr;
+
     LOG_INFO << "System jammed at packing fraction phi_j = " << std::fixed << std::setprecision(6) << phi_j;
-
-    LOG_INFO << "Purging rattlers from system...";
-    sys.purge_rattlers(); // This permanently removes rattlers
-    LOG_INFO << "Rattlers purged. " << sys.num_p << " particles remain.";
+    LOG_INFO << (sys.num_p - num_active_particles) << " rattlers identified. "
+             << num_active_particles << " active particles remain out of " << sys.num_p << " total.";
     LOG_INFO << "-----------------------------------------------------";
 
-    // --- Collect centers of mass ---
-    std::vector<Eigen::Vector2d> active_particle_COMs;
-    active_particle_COMs.reserve(sys.num_p);
+    // --- Collect centers of mass from ALL particles (including rattlers) ---
+    std::vector<Eigen::Vector2d> all_particle_COMs;
+    all_particle_COMs.reserve(sys.num_p);
     for (size_t i = 0; i < sys.num_p; ++i) {
-        active_particle_COMs.push_back(sys.particles[i]->com);
+        all_particle_COMs.push_back(sys.particles[i]->com);
     }
 
     // --- Writing Initial Jammed State Data ---
     logger.write_attribute("/", "Np", int(sys.num_p));
+    logger.write_attribute("/", "Np_active", int(num_active_particles));
     logger.write_attribute("/", "Nv", int(Nv));
     logger.write_attribute("/", "mu", mu_eff);
     logger.write_attribute("/", "bumpy", (int)(p_type == PARTICLE_TYPE::BUMPY));
+    logger.write_dataset("/active_mask", {sys.num_p}, std::vector<int>(sys.active.begin(), sys.active.end()));
 
     std::vector<double> flat_dynam_matrix;
     flat_dynam_matrix.reserve(sys.adj_contacts.nonZeros());
@@ -118,25 +152,28 @@ int main (int argc, char** argv) {
     std::vector<std::vector<Eigen::Vector2d>> all_cages(sys.num_p);
     std::vector<std::vector<Eigen::Vector2d>> all_sample_points(sys.num_p);
     size_t degenerate_cages = 0;
+    size_t active_particles_processed = 0;
 
-    LOG_INFO << "Generating initial Voronoi cages for " << sys.num_p << " particles...";
+    LOG_INFO << "Generating initial Voronoi cages for " << num_active_particles << " active particles...";
     for (size_t i = 0; i < sys.num_p; ++i) {
-        if ((i + 1) % std::max<size_t>(1, sys.num_p / 10) == 0 || i == sys.num_p - 1) {
+        if (!sys.active[i]) continue; // Only sample on non-rattlers
+
+        active_particles_processed++;
+        if (active_particles_processed % std::max<size_t>(1, num_active_particles / 10) == 0 || active_particles_processed == num_active_particles) {
             LOG_INFO << "  ... cage generation " << std::fixed << std::setprecision(1)
-                     << (100.0 * (i + 1) / sys.num_p) << "% complete ("
-                     << (i + 1) << "/" << sys.num_p << ").";
+                     << (100.0 * active_particles_processed / num_active_particles) << "% complete ("
+                     << active_particles_processed << "/" << num_active_particles << ").";
         }
-        all_cages[i] = make_cage(i, active_particle_COMs, sys.L);
+        all_cages[i] = make_cage(i, all_particle_COMs, sys.L);
         if (!all_cages[i].empty()) {
             all_sample_points[i] = generate_sample_points(all_cages[i], points);
         } else {
             degenerate_cages++;
         }
     }
-    LOG_INFO << "Initial cage generation finished. " << sys.num_p - degenerate_cages
+    LOG_INFO << "Initial cage generation finished. " << num_active_particles - degenerate_cages
              << " valid cages created (" << degenerate_cages << " degenerate).";
     LOG_INFO << "-----------------------------------------------------";
-
 
     // --- Neighbor Finding ---
     auto find_relevant_neighbors = [&] (size_t center_idx, const std::vector<Eigen::Vector2d>& cage) {
@@ -151,15 +188,17 @@ int main (int argc, char** argv) {
             return (a + t * ab - p).norm();
         };
 
-        for (size_t j = 0; j < sys.num_p; ++j) {
+        for (size_t j = 0; j < sys.num_p; ++j) { // Check against ALL particles
             if (j == center_idx) continue;
             const auto& pj = sys.particles[j];
             double Rj = 1 + 0.5 * pj->sigma;
             double effective_radius = R_center + Rj;
 
             Eigen::Vector2d cage_center(0, 0);
-            for (const auto& pt : cage) cage_center += pt;
-            cage_center /= cage.size();
+            if (!cage.empty()) {
+                for (const auto& pt : cage) cage_center += pt;
+                cage_center /= cage.size();
+            }
             Eigen::Vector2d shifted_com = pj->minimum_image(pj->com - cage_center, L) + cage_center;
 
             for (size_t i = 0; i < cage.size(); ++i) {
@@ -173,14 +212,9 @@ int main (int argc, char** argv) {
     };
 
     // --- Decompression Steps ---
-    std::vector<double> delta_phis = {0.0};
-    if (num_steps > 1) {
-        double log_min = std::min(std::log10(d_phi), -5.0);
-        double log_max = std::log10(d_phi);
-        double log_step = (log_max - log_min + 1) / (num_steps - 1);
-        for (size_t i = 1; i < num_steps; ++i) {
-            delta_phis.push_back(std::pow(10.0, log_min + (i-1) * log_step));
-        }
+    std::vector<double> delta_phis = {0.0, -4.0, -3.75, -3.5, -3.25, -3.0, -2.75, -2.5, -2.25, -2.0, -1.75, -1.5, -1.25, -1.0};
+    for (size_t i = 1; i < delta_phis.size(); i++) {
+        delta_phis[i] = std::pow(10.0, delta_phis[i]);
     }
 
     for (size_t decompress_idx = 0; decompress_idx < delta_phis.size(); ++decompress_idx) {
@@ -203,6 +237,7 @@ int main (int argc, char** argv) {
         std::string cages_group_path = decompress_group_path + "/cages";
         logger.create_group(cages_group_path);
         for (size_t i = 0; i < all_cages.size(); ++i) {
+            if (!sys.active[i]) continue; // Only write cages for active particles
             if (!all_cages[i].empty()) {
                 std::vector<double> cage_data; cage_data.reserve(all_cages[i].size() * 2);
                 for (const auto& pt : all_cages[i]) { cage_data.push_back(pt.x()); cage_data.push_back(pt.y()); }
@@ -210,10 +245,15 @@ int main (int argc, char** argv) {
             }
         }
 
+        active_particles_processed = 0;
         for (size_t i = 0; i < sys.num_p; ++i) {
-            if ((i + 1) % std::max<size_t>(1, sys.num_p / 10) == 0 || i == sys.num_p - 1) {
-                 LOG_INFO << "  ... calculating freedom " << std::fixed << std::setprecision(1)
-                          << (100.0 * (i + 1) / sys.num_p) << "% complete (" << (i + 1) << "/" << sys.num_p << ").";
+            if (!sys.active[i]) continue; // Only sample on active particles
+
+            active_particles_processed++;
+            if (active_particles_processed % std::max<size_t>(1, num_active_particles / 10) == 0 || active_particles_processed == num_active_particles) {
+                LOG_INFO << "  ... calculating freedom " << std::fixed << std::setprecision(1)
+                         << (100.0 * active_particles_processed / num_active_particles) << "% complete ("
+                         << active_particles_processed << "/" << num_active_particles << ").";
             }
 
             const auto& sample_pts = all_sample_points[i];

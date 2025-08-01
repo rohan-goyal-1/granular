@@ -10,8 +10,8 @@ import seaborn as sns
 FILE = "run.h5"
 GROUP = "/frames"
 INTERVAL = 5
-SAVE = False
-OUTFILE = "pbc_animation.mp4"
+SAVE = True
+OUTFILE = "animation.mp4"
 
 # === LOAD FRAMES AND SIGMA ===
 with h5py.File(FILE, 'r') as f:
@@ -21,7 +21,7 @@ with h5py.File(FILE, 'r') as f:
 
 # === BASIC INFO ===
 num_particles, num_verts, _ = frames[0].shape
-box_length = 15.38551506799709045
+box_length = 14.32313504043568031
 
 # === FIGURE SETUP ===
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -30,6 +30,8 @@ xlims = (-box_length * 0.5, box_length * 1.5)
 ylims = (-box_length * 0.5, box_length * 1.5)
 ax.set_xlim(*xlims)
 ax.set_ylim(*ylims)
+ax.set_xticks([])
+ax.set_yticks([])
 
 # === COMPUTE NECESSARY PBC SHIFTS TO COVER THE SCREEN ===
 n_shift_x = int(np.ceil((xlims[1] - xlims[0]) / box_length))
@@ -109,36 +111,36 @@ def animate(frame_idx):
             shifted_poly = verts[pi] + shift
             polygon_groups[pi][shift_idx].set_xy(shifted_poly)
 
-    # Step 2: Contacts between all particle images (excluding same particle)
-    keys = list(all_image_positions.keys())
-    contact_count = {pi: 0 for pi in range(num_particles)}  # NEW
-
-    for i in range(len(keys)):
-        pi1, vi1, s1 = keys[i]
-        p1 = all_image_positions[keys[i]]
-        for j in range(i + 1, len(keys)):
-            pi2, vi2, s2 = keys[j]
-            if pi1 == pi2:
-                continue  # skip same particle, even across periodic images
-            p2 = all_image_positions[keys[j]]
-            if np.linalg.norm(p1 - p2) < sigma_frame:
-                segments.append([p1, p2])
-                contact_count[pi1] += 1
-                contact_count[pi2] += 1
-
-    # NEW: Print warning for undercoordinated particles
-    for pi, count in contact_count.items():
-        if count < 4:
-            print(f"WARNING: Particle {pi} has only {count} contacts at frame {frame_idx}")
-
-    contact_lines.set_segments(segments)
+    # # Step 2: Contacts between all particle images (excluding same particle)
+    # keys = list(all_image_positions.keys())
+    # contact_count = {pi: 0 for pi in range(num_particles)}  # NEW
+    #
+    # for i in range(len(keys)):
+    #     pi1, vi1, s1 = keys[i]
+    #     p1 = all_image_positions[keys[i]]
+    #     for j in range(i + 1, len(keys)):
+    #         pi2, vi2, s2 = keys[j]
+    #         if pi1 == pi2:
+    #             continue  # skip same particle, even across periodic images
+    #         p2 = all_image_positions[keys[j]]
+    #         if np.linalg.norm(p1 - p2) < sigma_frame:
+    #             segments.append([p1, p2])
+    #             contact_count[pi1] += 1
+    #             contact_count[pi2] += 1
+    #
+    # # NEW: Print warning for undercoordinated particles
+    # for pi, count in contact_count.items():
+    #     if count < 4:
+    #         print(f"WARNING: Particle {pi} has only {count} contacts at frame {frame_idx}")
+    #
+    # contact_lines.set_segments(segments)
     return sum(circle_groups, []) + sum(polygon_groups, []) + [contact_lines]
 
 anim = animation.FuncAnimation(fig, animate, init_func=init, frames=len(frames),
                                interval=INTERVAL, blit=True, repeat=False)
 
 if SAVE:
-    anim.save(OUTFILE, fps=1000 // INTERVAL, dpi=200)
+    anim.save(OUTFILE, fps=100 // INTERVAL, dpi=200, writer='ffmpeg')
     print(f"Saved to {OUTFILE}")
 else:
     plt.show()

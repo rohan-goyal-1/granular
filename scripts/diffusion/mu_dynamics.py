@@ -10,13 +10,15 @@ command_base = "./bin/dynamics"
 max_parallel_runs = 4
 
 base_args = [
-    "--nv", "1",
-    "--np", "16",
-    "--dphi", "0.001",
-    "--steps", "3",
+    "--bumpy",
+    "--nv", "8",
+    "--np", "30",
+    "--phi_s", "0.60",
+    "--phi_e", "0.75",
+    "--steps", "16",
     "--dt", "0.001",
     "--dt_min", "1.0",
-    "--dt_max", "1000000.0",
+    "--dt_max", "10000.0",
 ]
 
 def run_simulation(run_index, mu_value, output_dir):

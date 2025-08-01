@@ -196,6 +196,7 @@ void System::set_energy (double E) {
     double pe = get_pe();
     if (E < pe) {
         LOG_WARNING << "Potential energy is too high; cannot set total energy that low";
+        return;
     }
     set_ke(E - pe);
 }
@@ -283,39 +284,63 @@ void System::fire_velocity_update(double dt_half) {
 }
 
 void System::fire_mix_velocity_and_force(double alpha) {
-    // Loop through each particle to apply the mixing rule individually
+    // --- Step 1: Calculate global norms, keeping translational and rotational DoFs separate ---
+
+    // Translational norms
+    double v_trans_global_sq_norm = 0.0;
+    double f_trans_global_sq_norm = 0.0;
+
+    // Rotational norms
+    double v_rot_global_sq_norm = 0.0;
+    double f_rot_global_sq_norm = 0.0;
+    bool has_rotational_dof = false;
+
     for (size_t i = 0; i < num_p; ++i) if (active[i]) {
-        // --- Translational Part ---
-        Eigen::Vector2d& v = particles[i]->com_v;
-        const Eigen::Vector2d& f = particles[i]->force;
+        // Accumulate translational components
+        v_trans_global_sq_norm += particles[i]->com_v.squaredNorm();
+        f_trans_global_sq_norm += particles[i]->force.squaredNorm();
 
-        double f_norm = f.norm();
-        double v_norm = v.norm();
+        // Accumulate rotational components if they exist
+        if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
+            has_rotational_dof = true;
+            v_rot_global_sq_norm += bumpy->ang_v * bumpy->ang_v;
+            f_rot_global_sq_norm += bumpy->torque * bumpy->torque;
+        }
+    }
 
-        if (f_norm > 1e-20) {
-            // v_new = (1-α)v + α * v_norm * (f / f_norm)
-            // This is algebraically equivalent to: v_new = v * (1-α) + f * (v_norm / f_norm * α)
-            double mixing_ratio = v_norm / f_norm * alpha;
-            v = v * (1.0 - alpha) + f * mixing_ratio;
+    // --- Step 2: Calculate separate mixing ratios ---
+
+    // Translational mixing ratio
+    double trans_mixing_ratio = 0.0;
+    if (f_trans_global_sq_norm > 1e-40) {
+        double v_trans_global_norm = std::sqrt(v_trans_global_sq_norm);
+        double f_trans_global_norm = std::sqrt(f_trans_global_sq_norm);
+        trans_mixing_ratio = v_trans_global_norm / f_trans_global_norm * alpha;
+    }
+
+    // Rotational mixing ratio
+    double rot_mixing_ratio = 0.0;
+    if (has_rotational_dof && f_rot_global_sq_norm > 1e-40) {
+        double v_rot_global_norm = std::sqrt(v_rot_global_sq_norm);
+        double f_rot_global_norm = std::sqrt(f_rot_global_sq_norm);
+        rot_mixing_ratio = v_rot_global_norm / f_rot_global_norm * alpha;
+    }
+
+    // --- Step 3: Apply the mixing rules using the corresponding ratio ---
+    for (size_t i = 0; i < num_p; ++i) if (active[i]) {
+        // --- Update Translational Part ---
+        if (f_trans_global_sq_norm > 1e-40) {
+            particles[i]->com_v = particles[i]->com_v * (1.0 - alpha) + particles[i]->force * trans_mixing_ratio;
         } else {
-            // If there's no force, there's no direction to steer; kill velocity.
-            v.setZero();
+            particles[i]->com_v.setZero(); // Kill velocity if translational force is globally zero
         }
 
-        // --- Rotational Part ---
+        // --- Update Rotational Part ---
         if (auto* bumpy = dynamic_cast<BumpyParticle*>(particles[i].get())) {
-            double& w = bumpy->ang_v;
-            const double& tau = bumpy->torque;
-
-            double tau_norm = std::abs(tau);
-            double w_norm = std::abs(w);
-
-            if (tau_norm > 1e-20) {
-                double mixing_ratio = w_norm / tau_norm * alpha;
-                w = w * (1.0 - alpha) + tau * mixing_ratio;
+            if (f_rot_global_sq_norm > 1e-40) {
+                bumpy->ang_v = bumpy->ang_v * (1.0 - alpha) + bumpy->torque * rot_mixing_ratio;
             } else {
-                // If there's no torque, kill angular velocity.
-                w = 0.0;
+                bumpy->ang_v = 0.0; // Kill angular velocity if torque is globally zero
             }
         }
     }
@@ -484,10 +509,10 @@ void System::send_to_jamming() {
 
         rescale(target_phi);
     }
-    LOG_INFO << "Steps took: " << step + 1;
+    // LOG_INFO << "Steps took: " << step + 1;
 
-    size_t num_ratt = remove_rattlers();
-    LOG_INFO << num_ratt;
+    remove_rattlers();
+    // LOG_INFO << num_ratt;
 }
 
 void System::update () {
